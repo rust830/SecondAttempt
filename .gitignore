@@ -1,0 +1,75 @@
+gitignore
+# ============ Unreal Engine 5：构建产物（可再生，绝不提交）============
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+Build/
+Script/
+
+# ============ 工程 / IDE 生成文件 ============
+.vs/
+.vscode/
+.idea/
+.vsconfig
+*.sln
+*.slnx
+*.xcodeproj
+*.xcworkspace
+*.VC.db
+*.opensdf
+*.sdf
+*.suo
+*.user
+
+# ============ 编译产物 ============
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+*.exe
+
+# ============ 隐私 / 密钥 / 凭据（硬规则：绝不上传）============
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+*.pem
+.aws/
+.ssh/
+credentials.json
+service-account*.json
+*-service-account.json
+*.secret
+secrets.*
+secret.*
+.netrc
+.git-credentials
+.npmrc
+.pypirc
+
+# ============ 日志 / 系统杂项 ============
+*.log
+.DS_Store
+Thumbs.db
+Desktop.ini
+desktop.ini
+
+# ============ 游戏资产（体积过大，不进 git）============
+# 7.5G 的 Paragon 素材包 + .uasset 二进制，本地保留，用 build/网盘交付
+Content/
+
+# 嵌套的独立 git 仓库（有自己的 .git，外层不跟踪，避免 gitlink）
+SecondAttempt/
