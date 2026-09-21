@@ -1,4 +1,3 @@
-gitignore
 # ============ Unreal Engine 5：构建产物（可再生，绝不提交）============
 Binaries/
 DerivedDataCache/
@@ -73,3 +72,6 @@ Content/
 
 # 嵌套的独立 git 仓库（有自己的 .git，外层不跟踪，避免 gitlink）
 SecondAttempt/
+
+# ============ Agent 工作数据（本地记忆 / 会话日志，不进版本控制）============
+.workbuddy/
