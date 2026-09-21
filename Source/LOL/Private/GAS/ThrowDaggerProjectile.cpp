@@ -1,15 +1,14 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 
-#include "ThrowDaggerProjectile.h"
+#include "GAS/ThrowDaggerProjectile.h"
 #include "GameFramework/ProjectileMovementComponent.h"
 #include "GameFramework/Pawn.h"
 #include "Components/SphereComponent.h"
 #include "Particles/ParticleSystemComponent.h"
-#include "Particles/ParticleSystem.h"
 #include "AbilitySystemComponent.h"
 #include "AbilitySystemBlueprintLibrary.h"
-#include "Kismet/GameplayStatics.h"
+#include "GameplayEffectTypes.h"
 #include "GAS/LOLGameplayTags.h"
 
 // Sets default values
@@ -85,34 +84,63 @@ void AThrowDaggerProjectile::OnOverlap(UPrimitiveComponent*, AActor* OtherActor,
 	if (!HasAuthority()) return;   
 
 	
+	// 伤害统一走 GE_Damage + UExecCalc_Damage（见 GAS_Block_Setup.md §3.6）。
+	// 这里只喂参数、不算伤害，格挡/抗性/减伤全在 ExecCalc 里，和近战是同一条路。
 	if (DamageGE)
 	{
 		UAbilitySystemComponent* TargetASC =
 			UAbilitySystemBlueprintLibrary::GetAbilitySystemComponent(OtherActor);
 		if (TargetASC)
 		{
+			// MakeEffectContext 拿到的 instigator 是【被打的人】（它自己的 OwnerActor/AvatarActor），
+			// 下面 AddInstigator 必须覆盖成投掷者 —— ExecCalc 靠它取攻击者 ASC 捕获攻击力/穿透，
+			// 不覆盖就会拿目标自己的属性算伤害。
 			FGameplayEffectContextHandle Context = TargetASC->MakeEffectContext();
 			Context.AddInstigator(GetInstigator(), this);
+			if (bFromSweep)
+			{
+				Context.AddHitResult(SweepResult);
+			}
+
 			FGameplayEffectSpecHandle Spec = TargetASC->MakeOutgoingSpec(DamageGE, 1.f, Context);
 			if (Spec.IsValid())
 			{
-				Spec.Data->SetSetByCallerMagnitude(LOLGameplayTags::Data_Damage, DamageAmount);
+				// 匕首是纯固定伤害：倍率给 0（不吃攻击力），数值走 FlatDamage。
+				// 想让匕首也吃攻击力加成，就在这里填倍率（=AD 系数），别改 ExecCalc 的公式。
+				Spec.Data->SetSetByCallerMagnitude(LOLGameplayTags::Data_DamageMultiplier, 0.f);
+				Spec.Data->SetSetByCallerMagnitude(LOLGameplayTags::Data_FlatDamage, DamageAmount);
+				Spec.Data->AddDynamicAssetTag(LOLGameplayTags::Damage_Physical);
+
 				TargetASC->ApplyGameplayEffectSpecToSelf(*Spec.Data.Get());
+			}
+			else
+			{
+				// 不静默：Spec 无效 = 匕首扎上去没伤害，看起来像「穿模飞过去了」。
+				UE_LOG(LogTemp, Warning, TEXT("[Dagger] DamageGE(%s) 的 Spec 无效 → 本次命中无伤害"),
+					*GetNameSafe(DamageGE));
 			}
 		}
 	}
 
 
-	const FGameplayTag HitType = ResolveHitType(OtherActor);
-	if (HitFXMap.Contains(HitType))
+	// 命中表现交给 GameplayCue：命中点/法线/目标类型打包进参数，
+	// 由投射物主人的 ASC 执行 → 自动多播，各客户端都看得到。
+	// 命中类型不放进 cue 标签（引擎只按弹出的那个标签查表，不会给子标签各跑一遍），
+	// 而是塞进 AggregatedTargetTags，由 cue 自己挑粒子。
+	if (UAbilitySystemComponent* SourceASC =
+		UAbilitySystemBlueprintLibrary::GetAbilitySystemComponent(GetInstigator()))
 	{
-		if (UParticleSystem* FX = HitFXMap[HitType].Get())
-		{
-			// 在命中点（而非 actor 中心）放 burst；detached 发射器不受 Destroy 影响，会播完
-			FVector HitLoc = GetActorLocation();
-			if (bFromSweep) HitLoc = SweepResult.ImpactPoint; // ImpactPoint 是 FVector_NetQuantize，隐式转 FVector
-			UGameplayStatics::SpawnEmitterAtLocation(GetWorld(), FX, FTransform(HitLoc));
-		}
+		const FGameplayTag HitType = ResolveHitType(OtherActor);
+
+		FGameplayCueParameters CueParams;
+		// ImpactPoint / ImpactNormal 是 FVector_NetQuantize，隐式转 FVector。
+		CueParams.Location = bFromSweep ? FVector(SweepResult.ImpactPoint) : GetActorLocation();
+		CueParams.Normal = bFromSweep ? FVector(SweepResult.ImpactNormal) : -GetActorForwardVector();
+		CueParams.Instigator = GetInstigator();
+		CueParams.EffectCauser = this;
+		CueParams.AggregatedTargetTags.AddTag(HitType);
+
+		SourceASC->ExecuteGameplayCue(LOLGameplayTags::GameplayCue_ThrowDagger_Hit, CueParams);
 	}
 
 	Destroy();

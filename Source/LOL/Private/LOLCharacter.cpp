@@ -49,6 +49,10 @@ ALOLCharacter::ALOLCharacter()
 
 void ALOLCharacter::DoMove(float Right, float Forward)
 {
+	// 死了不能走。技能那一侧由 UMyGameplayAbility 的 ActivationBlockedTags(State.Dead) 挡，
+	// 移动不走 GAS，所以这道门只能在这里。复活后 State.Dead 被 GE 摘掉，这里自动放行。
+	if (IsDead()) return;
+
 	if (GetController() != nullptr)
 	{
 		// find out which way is forward
@@ -79,6 +83,9 @@ void ALOLCharacter::DoLook(float Yaw, float Pitch)
 
 void ALOLCharacter::DoJumpStart()
 {
+	// 死了不能跳。理由同 DoMove。
+	if (IsDead()) return;
+
 	// signal the character to jump
 	Jump();
 }

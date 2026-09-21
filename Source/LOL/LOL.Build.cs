@@ -25,7 +25,9 @@ public class LOL : ModuleRules
 			"Niagara"
         });
 
-		PrivateDependencyModuleNames.AddRange(new string[] { });
+		// RenderCore：GC_Stealth.cpp 的诊断函数用了 Substrate::IsSubstrateEnabled()（RENDERCORE_API），
+		// 只在 .cpp 里用，所以放私有依赖。
+		PrivateDependencyModuleNames.AddRange(new string[] { "RenderCore" });
 
 		// Uncomment if you are using Slate UI
 		// PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });

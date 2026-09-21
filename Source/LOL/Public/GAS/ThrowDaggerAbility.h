@@ -12,9 +12,8 @@ class AThrowDaggerProjectile;
 class UAbilityTask_PlayMontageAndWait;
 class UGameplayEffect;
 class UAnimMontage;
-class UParticleSystem;
-class UParticleSystemComponent;
 class ACharacter;
+class USoundBase;
 
 /**
  * 投掷匕首：E 进瞄准 → 左键投掷 / E 再按取消。直线飞行、空中翻滚。
@@ -49,13 +48,15 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Throw|Anim")
 	TObjectPtr<UAnimMontage> ThrowDaggerMontage;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Throw|VFX")
-	TObjectPtr<UParticleSystem> AimingReticleFX;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Throw|VFX")
-	TObjectPtr<UParticleSystemComponent> AimingReticleFXComponent;
+	// 瞄准轮廓粒子（AimingReticleFX / AimingOutlineSocketName）搬到 GameplayCue 了，
+	// 见 AGC_ThrowAiming。能力只负责 Add/RemoveGameplayCue，不用再存组件指针、自己销毁。
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Throw|VFX")
-	float AimReticleDistance = 300.f;
+	/**
+	 * 出手（匕首脱手）时的一次性音效。默认 Kallari_Effort_Ability_E_Throw。留空 = 出手无声。
+	 * 进瞄准的抬手声在 AGC_ThrowAiming 上，命中声在 UGC_ThrowDaggerHit 上，三个点各管各的。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Throw|Sound")
+	TSoftObjectPtr<USoundBase> ThrowSound;
 
 	// 出手 socket（右手），匕首从这个 socket 的世界坐标射出。
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Throw|Projectile")
@@ -68,7 +69,6 @@ protected:
 
 	FActiveGameplayEffectHandle GEHandle;
 	UPROPERTY() TObjectPtr<UAbilityTask_PlayMontageAndWait> MontageTask = nullptr;
-	UPROPERTY() TObjectPtr<UParticleSystemComponent> AimReticleComponent = nullptr;
 	FTimerHandle TurnTimer;        // 出手前平滑转向的逐帧 timer
 	FTimerHandle ThrowDelayTimer;  // 左键确认 → 真正出手的延迟 timer
 

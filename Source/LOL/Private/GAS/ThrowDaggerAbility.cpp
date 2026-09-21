@@ -1,11 +1,11 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 
-#include "ThrowDaggerAbility.h"
+#include "GAS/ThrowDaggerAbility.h"
 #include "GAS/LOLGameplayTags.h"
 #include "GAS/GE_ThrowDaggerCooldown.h"
 #include "AbilitySystemComponent.h"
-#include "ThrowDaggerProjectile.h"
+#include "GAS/ThrowDaggerProjectile.h"
 #include "Abilities/Tasks/AbilityTask_WaitGameplayEvent.h"
 #include "Abilities/Tasks/AbilityTask_PlayMontageAndWait.h"
 #include "GameFramework/Character.h"
@@ -15,29 +15,25 @@
 #include "Animation/AnimMontage.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/World.h"
-#include "Particles/ParticleSystemComponent.h"
 #include "Kismet/GameplayStatics.h"
+#include "Sound/SoundBase.h"
+#include "UObject/SoftObjectPath.h"
 
 UThrowDaggerAbility::UThrowDaggerAbility()
 {
-	InstancingPolicy = EGameplayAbilityInstancingPolicy::InstancedPerActor; // 瞄准态是有实例的中间态
+	InstancingPolicy = EGameplayAbilityInstancingPolicy::InstancedPerActor;
 	NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::LocalPredicted;
 	ActivationPolicy = EMyAbilityActivationPolicy::OnInputTriggered;
 
-	CooldownDuration = 6.f; // 测试值
+	// 沉默挡法术：被沉默时扔不出匕首。死亡/眩晕在基类已经挡了，别重复加。
+	ActivationBlockedTags.AddTag(LOLGameplayTags::State_Silenced);
+
+	CooldownDuration = 6.f;
 	CooldownGameplayEffectClass = UGE_ThrowDaggerCooldown::StaticClass();
 
-	//dagger FX
-	AimingReticleFXComponent = CreateDefaultSubobject<UParticleSystemComponent>(TEXT("AimingReticleFXComponent"));
-	AActor* Avator = GetAvatarActorFromActorInfo();
-	if (Avator) {
-		ACharacter* Character = Cast<ACharacter>(Avator);
-		if (Character) {
-			AimingReticleFXComponent->SetupAttachment(Character->GetMesh(), TEXT("Muzzle_01"));
-		}
-	}
-	AimingReticleFXComponent->bAutoActivate = false;
-
+	// 默认指向 Paragon 的 E 技能投掷语音。软引用：默认值只是路径，编辑器里随时换。
+	ThrowSound = TSoftObjectPtr<USoundBase>(
+		FSoftObjectPath(TEXT("/Game/ParagonKallari/Audio/Cues/Kallari_Effort_Ability_E_Throw.Kallari_Effort_Ability_E_Throw")));
 }
 
 void UThrowDaggerAbility::ActivateAbility(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, const FGameplayAbilityActivationInfo ActivationInfo, const FGameplayEventData* TriggerEventData)
@@ -52,7 +48,6 @@ void UThrowDaggerAbility::ActivateAbility(const FGameplayAbilitySpecHandle Handl
 
 	bThrowCommitted = false;
 
-	UE_LOG(LogTemp, Warning, TEXT("[ThrowDagger] 进入瞄准态"));
 	EnterAimingState();
 
 	auto* WaitConfirm = UAbilityTask_WaitGameplayEvent::WaitGameplayEvent(
@@ -80,16 +75,13 @@ void UThrowDaggerAbility::EndAbility(const FGameplayAbilitySpecHandle Handle, co
 
 void UThrowDaggerAbility::OnThrowPressed(FGameplayEventData Payload)
 {
-	UE_LOG(LogTemp, Warning, TEXT("[ThrowDagger] 左键确认 → 投掷"));
-
 	// 真正投掷才 commit（消耗 CD + 蓝）
 	if (!CommitAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo))
 	{
 		EndAbility(CurrentSpecHandle, CurrentActorInfo, CurrentActivationInfo, true, true);
 		return;
 	}
-
-	// 纯看鼠标方向（相机朝向的水平分量），与人物脸朝向无关。
+	//dagger沿鼠标方向
 	// 在确认这一刻锁定，投掷延迟期间鼠标再动也不影响本次出手。
 	ThrowDirection = GetAimingDirection();
 
@@ -182,12 +174,11 @@ void UThrowDaggerAbility::EnterAimingState()
 		UE_LOG(LogTemp, Warning, TEXT("[ThrowDagger] ThrowDaggerMontage 为空！BP_GA_ThrowDagger 里没配"));
 	}
 
-	if (AimingReticleFXComponent)
+	// 匕首轮廓交给 GameplayCue（AGC_ThrowAiming）：它自己判断「只给本地控制端生成」，
+	// 并负责把粒子挂到武器 socket、退出时销毁。能力不用再存组件指针。
+	if (UAbilitySystemComponent* ASC = GetAbilitySystemComponentFromActorInfo())
 	{
-		if (!AimingReticleFXComponent->Template && AimingReticleFX) {
-			AimingReticleFXComponent->SetTemplate(AimingReticleFX);
-		}
-		AimingReticleFXComponent->Activate(true);
+		ASC->AddGameplayCue(LOLGameplayTags::GameplayCue_ThrowAiming);
 	}
 }
 
@@ -196,9 +187,6 @@ void UThrowDaggerAbility::ExitAimingState()
 	if (UAbilitySystemComponent* ASC = GetAbilitySystemComponentFromActorInfo())
 	{
 		ASC->RemoveLooseGameplayTag(LOLGameplayTags::State_Throw_Aiming);
-	}
-	if (AimingReticleFXComponent) {
-		AimingReticleFXComponent->Deactivate();
 	}
 	if (GEHandle.IsValid())
 	{
@@ -214,10 +202,11 @@ void UThrowDaggerAbility::ExitAimingState()
 		GetWorld()->GetTimerManager().ClearTimer(ThrowDelayTimer);
 	}
 	RestoreOrientRotationToMovement();   // 唯一恢复点：能力结束才恢复自动朝向，保证整个出手过程只朝瞄准方向转一次
-	if (AimReticleComponent)
+
+	// 摘掉瞄准轮廓 cue（AGC_ThrowAiming 在 OnRemove 里销毁自己的粒子组件）。
+	if (UAbilitySystemComponent* ASC = GetAbilitySystemComponentFromActorInfo())
 	{
-		AimReticleComponent->DestroyComponent();
-		AimReticleComponent = nullptr;
+		ASC->RemoveGameplayCue(LOLGameplayTags::GameplayCue_ThrowAiming);
 	}
 }
 
@@ -229,11 +218,10 @@ FVector UThrowDaggerAbility::GetAimingDirection() const
 	const AController* Controller = Character->GetController();
 	if (!Controller) { UE_LOG(LogTemp, Warning, TEXT("!Controller"));return Character->GetActorForwardVector(); }
 
-	// 第三人称：朝「相机朝向」的水平分量投掷（只用 Yaw，忽略俯仰，和 GA_Flash 一致）。
 	// 人物 mesh 是 bOrientRotationToMovement，会随移动转向（甚至正对相机），
 	// 所以不能用 GetActorForwardVector()；取控制旋转 Yaw 才是玩家看到的「鼠标方向」。
 	const FRotator ControlRotation = Controller->GetControlRotation();
-	return FRotationMatrix(FRotator(0.f, ControlRotation.Yaw, 0.f)).GetUnitAxis(EAxis::X);
+	return FRotationMatrix(FRotator(ControlRotation.Pitch, ControlRotation.Yaw, ControlRotation.Roll)).GetUnitAxis(EAxis::X);
 }
 
 void UThrowDaggerAbility::SpawnProjectile(const FVector& AimDir)
@@ -383,6 +371,18 @@ void UThrowDaggerAbility::FireDagger()
 	if (Character && !MontageTask)
 	{
 		Character->SetActorRotation(TargetFacingRotation);
+	}
+
+	// 出手音效：和匕首脱手同帧，放出手的 socket 上。
+	// 两端都会跑到这里（客户端预测那份 + 服务端那份），所以旁边的玩家也听得到 —— 这是想要的。
+	// 专用服务器没有音频设备，建出来也没人听，跳过。
+	UWorld* World = GetWorld();
+	if (World && World->GetNetMode() != NM_DedicatedServer)
+	{
+		if (USoundBase* Sound = ThrowSound.LoadSynchronous())
+		{
+			UGameplayStatics::PlaySoundAtLocation(World, Sound, GetThrowSocketLocation(Character));
+		}
 	}
 
 	if (K2_HasAuthority())   // 单机恒 true

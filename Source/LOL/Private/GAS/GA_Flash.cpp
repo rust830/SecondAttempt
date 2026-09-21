@@ -2,15 +2,14 @@
 
 #include "GAS/GA_Flash.h"
 #include "GAS/GE_FlashCooldown.h"
+#include "GAS/LOLGameplayTags.h"
+#include "AbilitySystemComponent.h"
+#include "GameplayEffectTypes.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/Controller.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Engine/World.h"
-#include "NiagaraSystem.h"
-#include "NiagaraFunctionLibrary.h"
-#include "Sound/SoundBase.h"
-#include "Kismet/GameplayStatics.h"
 
 UGA_Flash::UGA_Flash()
 {
@@ -18,7 +17,10 @@ UGA_Flash::UGA_Flash()
 	NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::LocalPredicted;
 	ActivationPolicy = EMyAbilityActivationPolicy::OnInputTriggered;   // Active: triggered by slot button
 
-	CooldownDuration = 300.f;   // LOL 闪现 CD，测试可先改 5~10
+	// 沉默挡法术，闪现也不例外（LoL 里被沉默是闪不出去的）。死亡/眩晕在基类已经挡了。
+	ActivationBlockedTags.AddTag(LOLGameplayTags::State_Silenced);
+
+	CooldownDuration = 300.f;  
 	CooldownGameplayEffectClass = UGE_FlashCooldown::StaticClass();
 }
 
@@ -53,8 +55,16 @@ void UGA_Flash::ActivateAbility(const FGameplayAbilitySpecHandle Handle, const F
 		Character->SetActorLocation(Destination, /*bSweep=*/false, nullptr, ETeleportType::None);
 	}
 
-	// 播放粒子/音效（表现层；单机下直接播，联网时客户端预测播放）。
-	PlayFlashEffects(Destination);
+
+
+	if (UAbilitySystemComponent* ASC = GetAbilitySystemComponentFromActorInfo())
+	{
+		FGameplayCueParameters CueParams;
+		CueParams.Location = Destination;
+		CueParams.Instigator = Character;
+		CueParams.EffectCauser = Character;
+		ASC->ExecuteGameplayCue(LOLGameplayTags::GameplayCue_Flash, CueParams);
+	}
 
 	EndAbility(Handle, ActorInfo, ActivationInfo, true, false);
 }
@@ -107,16 +117,4 @@ bool UGA_Flash::TryFindBlinkDestination(const ACharacter* Character, const FVect
 
 	OutDestination = Target;
 	return true;
-}
-
-void UGA_Flash::PlayFlashEffects(const FVector& Location) const
-{
-	if (FlashNiagara)
-	{
-		UNiagaraFunctionLibrary::SpawnSystemAtLocation(GetWorld(), FlashNiagara, Location);
-	}
-	if (FlashSound)
-	{
-		UGameplayStatics::PlaySoundAtLocation(GetWorld(), FlashSound, Location);
-	}
 }

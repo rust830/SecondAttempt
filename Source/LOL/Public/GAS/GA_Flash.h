@@ -7,8 +7,6 @@
 #include "GA_Flash.generated.h"
 
 class ACharacter;
-class UNiagaraSystem;
-class USoundBase;
 
 /** 召唤师技能「闪现」：朝相机朝向水平瞬移一段距离，带墙体安全检测（第三人称）。 */
 UCLASS(Blueprintable)
@@ -24,16 +22,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Flash", meta=(ClampMin="0", Units="cm"))
 	float FlashRange = 425.f;
 
-	/** 闪现粒子特效（表现层，可选）。 */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Flash|Effects")
-	TObjectPtr<UNiagaraSystem> FlashNiagara;
-
-	/** 闪现音效（表现层，可选）。 */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Flash|Effects")
-	TObjectPtr<USoundBase> FlashSound;
+	// 粒子和音效搬到 GameplayCue 了（见 UGC_Flash）。
+	// 能力只管「闪到哪」，表现由 cue 负责按落点播；这样联网时各客户端都会播，不依赖本端预测。
 
 private:
 	FVector ComputeFlashDirection(const ACharacter* Character) const;
 	bool TryFindBlinkDestination(const ACharacter* Character, const FVector& Start, const FVector& Target, FVector& OutDestination) const;
-	void PlayFlashEffects(const FVector& Location) const;
 };

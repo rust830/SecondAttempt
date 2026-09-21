@@ -10,7 +10,6 @@
 class UGameplayEffect;
 class USphereComponent;
 class UProjectileMovementComponent;
-class UParticleSystem;
 class UParticleSystemComponent;
 class UThrowDaggerFXData;
 UCLASS()
@@ -40,9 +39,11 @@ protected:
 	TSubclassOf<UGameplayEffect> DamageGE;
 	UPROPERTY()
 	float DamageAmount = 0.f;
-	//HitFXTable
-	UPROPERTY(EditAnywhere,BlueprintReadWrite)
-	TMap<FGameplayTag, TObjectPtr<UParticleSystem>> HitFXMap;
+
+	// 命中特效搬到 GameplayCue 了（见 UGC_ThrowDaggerHit）：
+	// 原来那段 SpawnEmitterAtLocation 写在 `if (!HasAuthority()) return;` 后面，
+	// 结果只有服务端放特效、客户端什么都看不到。走 cue 才会多播到各客户端。
+	// 同时「命中类型 → 粒子」的表也跟着搬到 cue 上（GC_ThrowDagger_Hit 的 HitFXMap）。
 
 	UFUNCTION()
 	void OnOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,

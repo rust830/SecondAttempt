@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "LOLGameMode.h"
-#include "MyPlayerState.h"
+#include "GAS/MyPlayerState.h"
 
 ALOLGameMode::ALOLGameMode()
 {
