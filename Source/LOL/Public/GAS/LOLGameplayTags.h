@@ -41,6 +41,17 @@ namespace LOLGameplayTags
 	UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Cooldown_ThrowDagger);
 	UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Cooldown_Stealth);
 	UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Cooldown_Block);
+	/**
+	 * 被动的冷却（比如「每 30 秒自动触发一次」那类）。
+	 *
+	 * 【现在没有能力在用它】—— 这是有意预留的：留着它，以后给被动配 CD 只需要在
+	 * 被动的 CooldownGameplayEffectClass 上把 CooldownTags 指到这里，
+	 * HUD 那条 `State.Cooldown.*` 的管道就自动认（不用回来改 HUD，也不用加新标签）。
+	 *
+	 * 语义上和另外五条完全同构：被动一样是「提交 CD → 挂 GE → 标签在=冷却中」，
+	 * 区别只在被动按不出来（Kind=Passive，不画键位），以及触发方式不是按键。
+	 */
+	UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Cooldown_Passive);
 	// 格挡窗口开着（时长 = GE_Blocking 的 Duration）；免疫中（时长 = GE_BlockImmune 的 Duration）。
 	// 判定读的就是这两个标签，没有第二个状态源。
 	UE_DECLARE_GAMEPLAY_TAG_EXTERN(State_Blocking);

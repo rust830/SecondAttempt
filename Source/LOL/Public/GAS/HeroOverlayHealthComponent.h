@@ -13,6 +13,10 @@
 // 和 HUDController 共享的两条纪律：
 //   · 属性用 GetGameplayAttributeValueChangeDelegate，不用 OnRep_*；
 //   · 绑定不触发初始值 → 绑完显式刷一次（见 SetObservedActor 末尾）。
+//
+// 挂点：组件自己吸附到 Owner 骨骼的 AttachSocketName 插槽（默认 "HealthBar"），
+// 所以蓝图里不必去 Parent Socket 下拉里选 —— 见 AttachToOwnerMeshSocket。
+// 想要纯数值（不带百分比的属性查询）走 UHeroAttributeLibrary，别在这里再开一条。
 
 #pragma once
 
@@ -47,6 +51,40 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HUD")
 	TObjectPtr<AActor> ObservedActorOverride;
 
+	// -----------------------------------------------------------------------
+	// 挂点：吸附到骨骼插槽
+	//
+	// 为什么不让蓝图直接设 Parent Socket 就完事：那要求【每个人物蓝图】都记得去
+	// 细节面板里选一次，而且角色换模型、改身高都要重来一遍 —— 漏配的表现是
+	// 「血条卡在某处不动」，而不是报错。吸附写在组件里，配一次（其实是零配置，
+	// 默认值就是约定好的名字）对所有人物生效。
+	// -----------------------------------------------------------------------
+
+	/**
+	 * 吸附到 Owner 骨骼上的哪个插槽。默认 "HealthBar"（角色骨骼上留的那个）。
+	 *
+	 * 置空（None）= 关掉吸附，完全按蓝图里配的父子关系走。
+	 * 小兵 / 建筑这类不需要跟骨骼动画的情况清空即可。
+	 *
+	 * 【名字为什么不叫 AttachSocketName】：那个名字被 USceneComponent 占了 ——
+	 * 就是细节面板 Transform 里的 Parent Socket，而且 UHT 不允许子类遮蔽父类成员
+	 * （会直接报 "shadowing is not allowed"）。两者的分工是：
+	 *   · 这个字段 = 【意图】，我们想吸附到哪；
+	 *   · 父类的 AttachSocketName = 【实际结果】，AttachToComponent 成功后会写进去。
+	 * 吸附成功时两者内容一致；置空这个只表示「不主动吸附」，父类那个照常如实反映现状。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HUD")
+	FName OwnerMeshSocketName = TEXT("HealthBar");
+
+	/**
+	 * 吸附之后再叠的相对偏移。默认零 = 正好落在插槽上。
+	 *
+	 * 要微调（比如让条子再高一点）改这里，别回头去动骨骼插槽 ——
+	 * 插槽位置是美术的东西，改它会波及所有引用它的地方。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HUD")
+	FVector SocketOffset = FVector::ZeroVector;
+
 	/** 满血时整条收起来（MOBA 里小兵血条的做法）。英雄一般关掉。 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "HUD")
 	bool bHideWhenFullHealth = false;
@@ -56,6 +94,14 @@ protected:
 	bool bHideWhenDead = false;
 
 private:
+	/**
+	 * 把组件吸附到 Owner 骨骼 mesh 的 AttachSocketName 插槽上。BeginPlay 调一次。
+	 *
+	 * 找不到 mesh / 没有这个插槽时【只警告、不吸附】—— 保留蓝图里配的挂位，
+	 * 血条照常工作，只是位置是手填的那个。这比让组件消失好排查得多。
+	 */
+	void AttachToOwnerMeshSocket();
+
 	void Bind();
 	void Unbind();
 

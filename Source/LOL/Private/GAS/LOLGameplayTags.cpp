@@ -20,6 +20,8 @@ namespace LOLGameplayTags
 	UE_DEFINE_GAMEPLAY_TAG(State_Cooldown_ThrowDagger, "State.Cooldown.ThrowDagger");
 	UE_DEFINE_GAMEPLAY_TAG(State_Cooldown_Stealth, "State.Cooldown.Stealth");
 	UE_DEFINE_GAMEPLAY_TAG(State_Cooldown_Block, "State.Cooldown.Block");
+	// 被动的冷却标签。目前没有能力在用 —— 预留，见 .h 里的说明。
+	UE_DEFINE_GAMEPLAY_TAG(State_Cooldown_Passive, "State.Cooldown.Passive");
 	UE_DEFINE_GAMEPLAY_TAG(State_Blocking, "State.Blocking");
 	UE_DEFINE_GAMEPLAY_TAG(State_BlockImmune, "State.BlockImmune");
 	UE_DEFINE_GAMEPLAY_TAG(State_Stealth, "State.Stealth");

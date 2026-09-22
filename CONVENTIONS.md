@@ -54,6 +54,36 @@ Source/LOL/
    （会写成 `UnrealEditor-LOL-<n>.dll` 补丁名），必须重编 `UnrealEditor-LOL.dll`。
 3. 打开一个引用了该类的蓝图，确认没有「找不到类」——正常情况下不该有，有就说明类名也改了。
 
+## 新增 `.cpp` 之后的自查：unity build 重名
+
+UE 默认开 unity build（`Intermediate/.../Module.LOL.N.cpp` 会把多个 `.cpp` 拼进同一个翻译单元）。
+**匿名 namespace 挡不住这种冲突** —— 它只保证跨 TU 不冲突；合进一个 TU 之后，同签名的自由函数就是
+重定义：
+
+```
+error C2084: 函数"`anonymous-namespace'::HasSocket(const USkeletalMeshComponent *, const FName &)"已有主体
+```
+
+**触发方式很隐蔽**：新增一个 `.cpp` 会让 UBT 重新分批，可能把原先不在同一批的两个文件凑到一起 ——
+表现成「我只加了个新文件，别人早就写好的重名代码突然炸了」。
+
+自查（列出会被 unity 撞上的内部函数名，有输出就是有重复）：
+
+```bash
+cd Source/LOL/Private
+grep -rhoP '^\t(?:bool|void|float|double|int32|int|uint8|FString|const TCHAR\*)\s+\K\w+(?=\()' . --include=*.cpp \
+  | sort | uniq -c | sort -rn | awk '$1>1'
+```
+
+改名时**新名字必须全局唯一**（加文件前缀，如 `SocketParticleHasSocket`）。
+**不要**改成「换个具名 namespace」——具名 namespace 是外部链接，不同批次的同名 namespace 会在
+**链接期**报 `LNK2005` 重复定义，比编译期更晚、更难查。
+
+> 已处理的：`HasSocket` / `DescribeUserParameters` / `WarnIfMissingParameter`
+> （涉及 `AnimNotifyState_SocketParticle.cpp` / `AnimNotifyState_BladeTrail.cpp` /
+> `GA_ThreeHitPassive.cpp` / `GC_EmpoweredHit.cpp`，都加了文件前缀）。
+> 这几份本质上是复制粘贴出来的同一段逻辑，更干净的做法是提成一个共享头 —— 改的时候一并考虑。
+
 ## 构建
 
 **用 `Tools/vs_build.py`，不要直接跑 `Engine/Build/BatchFiles/Build.bat`。**

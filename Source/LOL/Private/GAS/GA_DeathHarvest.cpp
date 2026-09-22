@@ -76,7 +76,9 @@ UGA_DeathHarvest::UGA_DeathHarvest()
 
 	// 大招标签：以后「施法者死亡/被控时取消所有大招」那条路要 CancelAbilitiesWithTag(Ability.Type.Ultimate)，
 	// 现在项目里还没有那条路（见 GAS_DeathHarvest_Setup.md §7 的架构缺口），但标签先挂上。
-	AbilityTags.AddTag(LOLGameplayTags::Ability_Type_Ultimate);
+	// AbilityTags 在 5.5 起弃用（要往私有化走），构造函数里改用 SetAssetTags 一次性设定。
+	// 效果等价：读的那一侧（MyAbilitySystemComponent 查 Ability.Policy.*）走 GetAssetTags()。
+	SetAssetTags(FGameplayTagContainer(LOLGameplayTags::Ability_Type_Ultimate));
 
 	// 挡重入。技能期间挂自己的 State.DeathHarvest.Casting（服务器本地标签，见 ActivateAbility）。
 	// 冷却 GE 其实也挡得住，但冷却要等 CommitAbility 之后才有 —— 这两个覆盖的时间窗不一样。

@@ -291,9 +291,9 @@ HUD 如果是第二套判据，就会出现**技能栏亮着但按下去被拒**
 | 目标框 | 目标 ASC 的 Health/MaxHealth + 名字 | `SetObservedTarget` 重绑后的属性委托 |
 
 **六个槽 = `Ability.Slot.Q / W / E / R / D / F`。**
-`Ability.Slot.Block`（右键）和 `Ability.Slot.Passive` 不在六槽里：格挡在 HUD 上通常是一个独立的指示器（读 `State.Cooldown.Block`），被动是一条"强化普攻亮起"的提示（读 `State.EmpoweredAttack`）。两者都复用同一条 Self 通道，只是 Widget 长得不一样。
+`Ability.Slot.Block`（右键格挡）和 `Ability.Slot.Passive` 不在六槽里，但**可以进 `Slots` 数组** —— 只是要配 `bHideWhenUnavailable`（见 §15）。格挡在 HUD 上通常是一个独立的指示器（读 `State.Cooldown.Block`），被动是一条"强化普攻亮起"的提示（读 `State.EmpoweredAttack`）；两者都复用同一条 Self 通道，只是 Widget 长得不一样。
 
-**现状提醒**：目前只有五条冷却标签（`Flash` / `ThrowDagger` / `Stealth` / `Block` / `DeathHarvest`），六个槽里有些槽映射不到冷却标签（比如被动）。所以映射表**必须允许 CooldownTag 为空**，空 = 这个槽没有冷却转圈。
+**现状提醒**：目前有六条冷却标签（`Flash` / `ThrowDagger` / `Stealth` / `Block` / `Passive` / `DeathHarvest`），但六个主动槽里只有 4 条能映射上，所以映射表**必须允许 CooldownTag 为空**，空 = 这个槽没有冷却转圈。`State.Cooldown.Passive` 目前**没有任何能力在用**，是刻意预留的（见 §15）。
 
 ---
 
@@ -310,6 +310,10 @@ struct FHeroHUDSlotEntry
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly) FGameplayTag SlotTag;
     /** 对应的冷却标签：State.Cooldown.Flash 等。留空 = 该槽不显示冷却转圈。 */
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly) FGameplayTag CooldownTag;
+    /** 种类：Active / Passive / Block。唯一影响是被动不画键位标注。 */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly) EHeroHUDSlotKind Kind = EHeroHUDSlotKind::Active;
+    /** 没能力时整格收起（预留位用），而不是画一个灰格子。默认 false。 */
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly) bool bHideWhenUnavailable = false;
     /** UI 侧静态表现。Widget 不认标签，只收这几个字段。 */
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly) TObjectPtr<UTexture2D> Icon;
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly) FText KeyLabel;      // "Q" / "W" / ...
@@ -348,6 +352,9 @@ public:
 | `UHeroSkillSlotWidget` | `Public/UI/HeroSkillSlotWidget.h` + `.cpp` | `WBP_SkillSlot` | 单个槽：图标、转圈、秒数、灰化。只认 `int32 SlotIndex` |
 | `UHeroHealthBarWidget` | `Public/UI/HeroHealthBarWidget.h` + `.cpp` | `WBP_HealthBar` | 血条 / 能量条（一个类两个实例，`bIsEnergy` 开关） |
 | `UHeroOverlayHealthWidget` | `Public/UI/HeroOverlayHealthWidget.h` + `.cpp` | `WBP_OverlayHealth` | 敌人头顶血条（`UWidgetComponent`），**不走 HUDController** |
+| `UHeroOverlayHealthComponent` | `Public/GAS/HeroOverlayHealthComponent.h` + `.cpp` | 挂在人物 BP 上 | 头顶血条的迷你翻译层：绑 Owner 的属性 + **自动吸附到骨骼插槽**（§12.7） |
+| `FHeroAttributeView` | `Public/GAS/HeroAttributeView.h` | — | **24 条属性的裸数值快照**。零 GAS include、零派生比率 |
+| `UHeroAttributeLibrary` | `Public/GAS/HeroAttributeLibrary.h` + `.cpp` | — | 属性数值的唯一查询出口（静态函数库），任何 Actor 都能查（§14） |
 
 **`ALOLPlayerController` 的改动**（三行 + 三个 override）：
 
@@ -499,20 +506,25 @@ Content Browser → 右键 → **Miscellaneous → Data Asset** → 选 `HeroHUD
 |---|---|
 | `SlotTag` | `Ability.Slot.Q` / `.W` / `.E` / `.R` / `.D` / `.F` |
 | `CooldownTag` | 对应的 `State.Cooldown.*`，**可以留空** |
+| `Kind` | `Active`（默认）/ `Passive` / `Block`。**被动必须选 `Passive`**，否则会画出一个没有意义的键位字母 |
+| `bHideWhenUnavailable` | 六个主动槽留 `false`；**预留的被动 / 格挡槽勾上 `true`**（见 §15） |
 | `Icon` | 该技能的图标 `Texture2D` |
-| `KeyLabel` | `"Q"` / `"W"` / …（显示用，不是输入绑定） |
+| `KeyLabel` | `"Q"` / `"W"` / …（显示用，不是输入绑定）。`Kind=Passive` 时留空即可，C++ 会强制清掉 |
 | `DisplayName` | 技能名（tooltip 用） |
 
 > **数组顺序就是 UI 顺序**，数组下标就是 `FSkillSlotView::SlotIndex`。这是这份资产存在的意义 —— 别在蓝图里再排一次序。
 
 **现有可用的标签（照抄，别手打）**：
 
-- 槽位：`Ability.Slot.Q` / `Ability.Slot.W` / `Ability.Slot.E` / `Ability.Slot.R` / `Ability.Slot.D` / `Ability.Slot.F`（另有 `.Passive` / `.Block`，不在六槽里）
-- 冷却：`State.Cooldown.Flash` / `.ThrowDagger` / `.Stealth` / `.Block` / `.DeathHarvest`
+- 槽位：`Ability.Slot.Q` / `Ability.Slot.W` / `Ability.Slot.E` / `Ability.Slot.R` / `Ability.Slot.D` / `Ability.Slot.F`（另有 `.Passive` / `.Block`，见 §15）
+- 冷却：`State.Cooldown.Flash` / `.ThrowDagger` / `.Stealth` / `.Block` / `.Passive` / `.DeathHarvest`
 
-> **现在只有 5 条冷却标签，其中 `State.Cooldown.Block` 属于 `Ability.Slot.Block`（右键格挡，不在六槽内）。**
-> 所以六条槽里通常只有 4 条能映射到冷却 —— **`CooldownTag` 留空是合法的**（该槽不显示转圈），
+> **六条主动槽里通常只有 4 条能映射到冷却** —— `Ability.Slot.D` / `.F` 一般是召唤师技能和鞋子，
+> 各自有独立的冷却体系。**`CooldownTag` 留空是合法的**（该槽不显示转圈），
 > 不要为了让表"填满"而乱配。这条在 §5 和 `HeroHUDSlotConfig.h` 的注释里都写了，很容易被忽略。
+>
+> `State.Cooldown.Block` 和 `.Passive` 都属于**不在六槽里**的两个槽，只在你按 §15 把
+> `Ability.Slot.Block` / `.Passive` 加进 `Slots` 数组时才用得上。
 
 **槽位顺序对着你现有的 `AbilityInputConfig` 抄** —— 那是"哪个键 → 哪个槽"的权威定义，别在这里另起一套。代码里只有一个锚点可参考：`ThrowDaggerAbility.cpp:112` 判断的是 `Ability.Slot.E`，所以投掷匕首在 E 槽。
 
@@ -598,9 +610,18 @@ Class Defaults：`SkillSlotWidgetClass` = `WBP_SkillSlot`。
 | `Space` | **`Screen`** —— 用 `World` 的话血条会跟着角色一起旋转 |
 | `Draw Size` | 按需（比如 120×12） |
 | `Pivot` | `(0.5, 1.0)` —— 让条子底边贴住锚点，向上长 |
-| 相对位置 | 头顶偏移（胶囊体半高 + 一点余量） |
+| `Owner Mesh Socket Name` | **`HealthBar`**（默认值，一般不用改）—— 见下 |
+| `Socket Offset` | 留空。真要微调高低才填，比如 `(0, 0, 20)` |
 | `Hide When Full Health` | 小兵 `true`、英雄 `false` |
 | `Hide When Dead` | 按需 |
+
+**挂点不用手填，组件自己吸附到骨骼插槽。** 角色的骨骼上留了名为 `HealthBar` 的插槽，`BeginPlay` 时组件会自己 `AttachToComponent(Owner 的 SkeletalMesh, ..., "HealthBar")`。所以：
+
+- **不需要**在细节面板里选 `Parent Socket`，也**不需要**填相对位置 —— 位置由骨骼决定，跟着动画走。
+- 插槽名不是硬编码：`Owner Mesh Socket Name` 是可改的属性，**留空（None）= 关掉吸附**，完全按蓝图里配的父子关系走（小兵 / 建筑这类不跟骨骼的情况用）。
+- 它和 Transform 里的 `Parent Socket` **不是一回事**：`Parent Socket` 是引擎的 `USceneComponent::AttachSocketName`（实际结果，`AttachToComponent` 写它）；`Owner Mesh Socket Name` 是组件的「意图」（想吸附到哪）。名字没复用 `AttachSocketName` 是因为 UHT 不允许子类遮蔽父类成员，会直接报 `shadowing is not allowed`。
+- 要微调高度改 `Socket Offset`，**别去动骨骼插槽** —— 那个插槽是给美术用的，挪它会波及所有引用它的地方。
+- 吸附失败（没有 SkeletalMesh / 骨骼上没有这个插槽）时**只打 Warning 不吸附**，保留蓝图里配的挂位。这是故意的：`AttachToComponent` 传一个不存在的插槽名不会报错，而是静默挂到 mesh 原点，表现是「血条跑到脚底」—— 比不挂更难查。
 
 它**完全不走 HUDController**：每个敌人各绑自己的 ASC 属性委托，五个人打团不会挤本地玩家那一个 30Hz 心跳。组件默认观察 `GetOwner()`，绝大多数情况不用改。
 
@@ -678,3 +699,126 @@ python Tools/vs_show.py open-changed --minutes 10   # 把最近改过的源文�
 - `Source\LOL\LOLCharacter.h`（现已在 `Public\`）
 
 **不影响编译**，只是 VS 的打开标签留在老位置。看着碍眼就手动关掉。
+
+---
+
+## 14. 属性数值查询：`UHeroAttributeLibrary`
+
+前面 13 节讲的是 **HUD**（血条怎么画、技能槽怎么灰）。这一节是另一个需求：**「某个角色现在攻击力 / 护甲 / 移动速度是多少」** —— 以后的属性面板、死亡回放、调试叠加层都用它。两者不重叠：HUD 要的是「画多长」，这里要的是「值是多少」。
+
+### 14.1 一次调用拿全量
+
+```cpp
+// 蓝图里就是一个纯函数节点：Get Hero Attributes
+FHeroAttributeView View = UHeroAttributeLibrary::GetHeroAttributes(SomeActor);
+if (View.bValid)
+{
+    // View.AttackDamage / View.Armor / View.MoveSpeed / ...
+}
+```
+
+`FHeroAttributeView`（`Public/GAS/HeroAttributeView.h`）= **`bValid` + 24 条属性的当前值**，字段顺序对齐 `UHeroCombatAttributeSet`（资源 6 → 输出 12 → 防御 3 → 通用 3）。
+
+### 14.2 三条设计决定
+
+**① 不带百分比。** 这个结构体回答「数值是多少」，不回答「进度条画多长」。要画条走 `FHUDVitalsView` —— 它带 `HealthPercent` / `EnergyPercent`，因为那是 **UI 语义**（1 = 满，直接喂 `ProgressBar`），而且是事件推的。给每条资源都挂一个 `*Percent` 会多出 6 个必须同步维护的字段，而「分母是什么」还会漂移（当前血 / 最大血？还是当前血 / 满级血？）。**百分比只属于进度条那一层。**
+
+**② 不做 24 个独立 getter。** 一次调用 + 一个 `Break` 节点；加属性只改结构体。换成 24 个函数就是 24 个节点、24 次 ASC 子对象查找，而且每加一条属性都要补一个接口。
+
+**③ 静态函数库，不是某个对象上的成员。** 挂 `UHeroHUDController` 上就只能查本地玩家（目标框 / 敌人 / 小兵都查不到），而且会把它从「UI 语义翻译层」变成属性大杂烩；挂 `PlayerState` 上则查不到小兵 / 建筑。传 Actor 进来的静态函数谁的数值都能查，没有状态、没有生命周期。
+
+### 14.3 唯一入口，且只有一条找 ASC 的路
+
+`UHeroAttributeLibrary` 内部只走 `UMyAbilitySystemComponent::FindAbilitySystemComponent` —— 和**选目标 / 伤害校验用的是同一条路**。别在别处再写一遍「怎么从 Actor 找 ASC」：蓝图库那条路在「接口 Cast 成功但返回 nullptr」时不会继续往下试（见 `MyAbilitySystemComponent.h` 里那段注释），口径不一致会出「客户端认得出、服务端认不出」的诡异不同步。
+
+读不到 ASC / ASC 上没挂属性集时返回 **`bValid = false`**，其余字段是 0 —— **不是「血是 0」**。用法上应当直接跳过显示，而不是画一条空血条。
+
+### 14.4 它只读，不监听
+
+不缓存、不广播、不持有句柄。需要「变了通知我」的场景：
+
+- HUD 用 → `UHeroHUDController` 的 `OnVitalsChanged` / `OnSkillSlotChanged`（已经处理好了绑定时机、重试、解绑）；
+- 别的用途 → 自己对 `ASC->GetGameplayAttributeValueChangeDelegate(...)` 加委托。
+
+**别把这个库扩成事件源。** 一旦它开始广播，就要处理订阅生命周期（谁绑的、什么时候解绑、ASC 被换了怎么办），那就等于把 `UHeroHUDController` 那一整套复杂度又抄了一遍。
+
+---
+
+## 15. 被动 / 格挡的预留位
+
+### 15.1 结论：C++ 已经就绪，加被动不用回来改代码
+
+技能栏本身是**完全数据驱动**的 —— `Slots` 数组里有几条就建几个槽，`SlotTag` 填什么就查什么能力。所以"支持被动"不需要新结构，只需要两个开关：`Kind`（画法）和 `bHideWhenUnavailable`（还没实装时别占地方）。
+
+两个槽位标签**早就定义好了**，直接能用：
+
+| 槽位标签 | 用途 | 现在的状态 |
+|---|---|---|
+| `Ability.Slot.Passive` | 被动（三连击已经挂在它上面，`RouteBasicAttackInput` 就是按它查句柄的） | **已在使用** |
+| `Ability.Slot.Block` | 右键格挡 | **零引用** —— 标签在，但没有任何能力 / `UAbilitySet` 条目挂它 |
+
+冷却标签六条齐了：`State.Cooldown.Flash / ThrowDagger / Stealth / Block / Passive / DeathHarvest`。其中 **`State.Cooldown.Passive` 是这次新增的预留项，目前没有能力在用**。
+
+### 15.2 两步操作
+
+**第一步：`DA_HUDSlots` 里加条目。**
+
+| 字段 | `Passive` 条目 | `Block` 条目 |
+|---|---|---|
+| `SlotTag` | `Ability.Slot.Passive` | `Ability.Slot.Block` |
+| `CooldownTag` | `State.Cooldown.Passive` | `State.Cooldown.Block` |
+| `Kind` | **`Passive`** | `Block` |
+| `bHideWhenUnavailable` | **`true`** | **`true`** |
+| `KeyLabel` | 留空 | 留空（或右键图标，走 `BP_OnSlotViewChanged` 自己画） |
+
+放在数组的哪一头由你定 —— **数组顺序就是 UI 顺序**，把被动放最前面就是"被动在技能栏最左边"，LoL 的做法。
+
+**第二步（只有格挡需要）：让能力带上槽位标签。**
+
+HUD 认槽位的方式是 `ASC->GetHandleForSlot(SlotTag)`，它扫的是 `AbilitySpec.DynamicAbilityTags` 里的 `Ability.Slot.` 前缀。这个标签是 `UAbilitySet` 授予时打上去的：
+
+```cpp
+// UAbilitySet::GiveToAbilitySystem
+FGameplayAbilitySpec Spec(GA.Ability, GA.AbilityLevel);
+if (GA.SlotTag.IsValid()) { Spec.DynamicAbilityTags.AddTag(GA.SlotTag); }
+```
+
+所以给格挡加槽位身份 = **在授予 `GA_Block` 的那条 `UAbilitySet` 条目里把 `SlotTag` 填成 `Ability.Slot.Block`**。不填的话 HUD 永远判 `NoAbility` —— 配了 `bHideWhenUnavailable=true` 就正好隐身（不会难看），但冷却转圈也永远不出现。
+
+> ⚠️ 一个 `AbilitySet` 条目只能带一个 `SlotTag`。格挡现在应该还没有条目（走的是另一条路径），加的时候别顺手把它挂到六槽之一上。
+
+### 15.3 为什么是 `bHideWhenUnavailable`，而不是"先不加这条"
+
+因为**加被动那天你要回来改的地方不一样**：
+
+- 先不加 → 以后加被动，要改 DA（加条目）+ 确认 Widget 分组 + 可能还要动布局；
+- 现在预留 + 勾隐藏 → 以后加被动，**只在被动的 CD 配置那边指一下 `State.Cooldown.Passive`**，HUD 这边一个字不动。能力一授予，格子自己出现。
+
+代价只有一个：DA 里多两条现在"看不见"的记录。这是划算的。
+
+### 15.4 被动的 CD 怎么接（和主动技能完全同构）
+
+被动一样走 GE 冷却那套，没有任何特殊路径：
+
+1. 被动的 `UGameplayAbility::CooldownGameplayEffectClass` 指向一个 `GE_Cooldown_Passive`；
+2. 那个 GE 的 `GrantedTags` 填 `State.Cooldown.Passive`（时长用 `SetByCaller` 或固定值）；
+3. HUD 侧什么都不用做 —— `RebuildSlot` 已经在按 `CooldownTag` 查标签、按 `GetCooldownTimeRemainingAndDuration()` 采秒数。
+
+**触发方式不同不影响显示**：主动技能是按键激活，被动可能是事件 / 定时器触发，但对 HUD 来说都是"某个时刻 `State.Cooldown.Passive` 挂上了，一段时间后摘掉"。
+
+> 唯一的例外：如果被动用的是**自研的 timer 冷却**（不走 GAS 冷却 GE），HUD 就看不见 —— 因为 `QueryCooldown` 读的是 `Ability->GetCooldownTimeRemainingAndDuration()`，它只认 GE。要做那种被动，就得自己往 `FSkillSlotView` 推（或者改成 GE，推荐后者）。
+
+### 15.5 Widget 侧已经处理好的两件事
+
+不用改 `WBP_SkillSlot` 也能正确工作：
+
+- **`bHidden` → `SetVisibility(Collapsed)`**（`UHeroSkillSlotWidget::ApplySlotView`）。恢复时回到的是**你在 WBP 里配的可见性**（首次应用时记下来的），不是硬写 `Visible` —— 所以 `HitTestInvisible` 之类不会被冲掉。
+- **`Kind == Passive` → 强制清空 `KeyLabelText`**。被动按不出来，留着模板里的占位字母是错的；不管 `KeyLabel` 配了什么都会清掉。
+
+想再加东西（被动图标加个"就绪"高光、格挡显示右键图标）走 `BP_OnSlotViewChanged(View)`，`View.Kind` 在里面读得到。
+
+### 15.6 三个容易踩的坑
+
+1. **`bHidden` 和 `State == Disabled` 不是一回事。** `Disabled` 说的是"槽位空"，UI 该画一个空框；`bHidden` 说的是"这条根本没打算让人看见"。两个判据分开写是有意的 —— 合并之后，以后调灰化优先级会顺手把"隐身槽位"的语义改掉。
+2. **没能力 ≠ 该隐身。** 判据是 `IsReservedSlotHidden(Entry, bHasAbility)` = `Entry && Entry->bHideWhenUnavailable && !bHasAbility`。**没有条目时（越界 / 配置为空）不隐藏** —— 那是配置坏了，应该看得见才好排查，而不是安静地少一格。
+3. **`Kind=Passive` 忘了配的表现**：格子上会多一个没有意义的键位字母（因为 `KeyLabel` 留空时 C++ 会保留 WBP 模板里的占位文字）。主动槽那条"只在 `KeyLabel` 非空时才写"的规则就是为了防止加载期闪空白，反而会在被动上暴露成这个症状。

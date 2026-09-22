@@ -238,7 +238,7 @@ void UMyAbilitySystemComponent::AbilityInputTagHeld(const FGameplayTag& SlotTag)
 		if (!AbilityCDO) return;
 
 		// ��鼼���Ƿ���� "������ס�ظ�����" �ı�ǩ
-		if (!AbilityCDO->AbilityTags.HasTag(FGameplayTag::RequestGameplayTag(FName("Ability.Policy.RepeatOnHold"))))
+		if (!AbilityCDO->GetAssetTags().HasTag(FGameplayTag::RequestGameplayTag(FName("Ability.Policy.RepeatOnHold"))))
 		{
 			return;
 		}
@@ -310,8 +310,8 @@ void UMyAbilitySystemComponent::SetAbilityLevelForSlot(const FGameplayTag& SlotT
 void UMyAbilitySystemComponent::OnGiveAbility(FGameplayAbilitySpec& AbilitySpec)
 {
 	Super::OnGiveAbility(AbilitySpec);
-	UE_LOG(LogTemp, Warning, TEXT("[Passive] OnGiveAbility: %s (动态标签 %d 个)"), *GetNameSafe(AbilitySpec.Ability), AbilitySpec.DynamicAbilityTags.Num());
-	for (const FGameplayTag& Tag : AbilitySpec.DynamicAbilityTags) {
+	UE_LOG(LogTemp, Warning, TEXT("[Passive] OnGiveAbility: %s (动态标签 %d 个)"), *GetNameSafe(AbilitySpec.Ability), AbilitySpec.GetDynamicSpecSourceTags().Num());
+	for (const FGameplayTag& Tag : AbilitySpec.GetDynamicSpecSourceTags()) {
 		UE_LOG(LogTemp, Warning, TEXT("[Passive]   标签: %s"), *Tag.ToString());
 		if (Tag.ToString().StartsWith(TEXT("Ability.Slot."))) {
 			SlotAbilityMap.Add(Tag, AbilitySpec.Handle);
@@ -322,7 +322,7 @@ void UMyAbilitySystemComponent::OnGiveAbility(FGameplayAbilitySpec& AbilitySpec)
 
 void UMyAbilitySystemComponent::OnRemoveAbility(FGameplayAbilitySpec& AbilitySpec)
 {
-	for (const FGameplayTag& Tag : AbilitySpec.DynamicAbilityTags) {
+	for (const FGameplayTag& Tag : AbilitySpec.GetDynamicSpecSourceTags()) {
 		if (Tag.ToString().StartsWith(TEXT("Ability.Slot."))) {
 			SlotAbilityMap.Remove(Tag);
 		}

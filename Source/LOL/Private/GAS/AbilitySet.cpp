@@ -18,7 +18,9 @@ void UAbilitySet::GiveToAbilitySystem(UAbilitySystemComponent* ASC) const
 		if (!GA.Ability)continue;
 		FGameplayAbilitySpec Spec(GA.Ability, GA.AbilityLevel);
 		if (GA.SlotTag.IsValid()) {
-			Spec.DynamicAbilityTags.AddTag(GA.SlotTag);
+			// 5.5 起 DynamicAbilityTags 改名成 GetDynamicSpecSourceTags()（同一个容器，只是名字更准）。
+			// 槽位标签就是靠它被 UMyAbilitySystemComponent::OnGiveAbility 认出来的。
+			Spec.GetDynamicSpecSourceTags().AddTag(GA.SlotTag);
 		}
 		ASC->GiveAbility(Spec);
 	}

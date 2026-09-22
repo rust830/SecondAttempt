@@ -1,0 +1,80 @@
+site_name: LOL · UE 5.8 MOBA
+site_description: UE 5.8 LoL 风格 MOBA 项目的设计与实现文档
+site_url: https://rust830.github.io/SecondAttempt/
+repo_url: https://github.com/rust830/SecondAttempt
+repo_name: rust830/SecondAttempt
+
+# 文档源在仓库根目录（GAS_*_Setup.md 放项目根是既定约定），
+# Tools/sync_docs.py 会把它们拷进 docs/。docs/ 是构建中间产物，已 gitignore。
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  language: zh
+  features:
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: 跟随系统
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: 切到浅色
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: 切到深色
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+plugins:
+  # lang 里带 zh 会启用中文分词（依赖 jieba），否则中文只能整句匹配。
+  - search:
+      lang:
+        - zh
+        - en
+
+nav:
+  - 首页: index.md
+  - 工程规范: CONVENTIONS.md
+  - GAS 技能:
+      - 格挡: GAS_Block_Setup.md
+      - 隐身: GAS_Stealth_Setup.md
+      - 三连击被动: GAS_ThreeHitPassive_Setup.md
+      - 投掷匕首: GAS_ThrowDagger_Setup.md
+      - 死亡收割: GAS_DeathHarvest_Setup.md
+  - HUD 管道: GAS_HUD_Setup.md
+  - 工具链: Tools-README.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/rust830/SecondAttempt

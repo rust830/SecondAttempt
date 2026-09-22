@@ -15,8 +15,12 @@
 
 namespace
 {
+	// 下面两个 helper 带 EmpoweredHit 前缀是必须的，别改回通用名：unity build 会把多个 .cpp 合进同一个
+	// Module.LOL.N.cpp，匿名 namespace 只挡【跨 TU】的冲突，合进一个 TU 之后同签名就是重定义（C2084），
+	// 而哪些文件同批由 UBT 按文件名决定。GA_ThreeHitPassive 里有一份同样的实现。
+
 	/** 把系统里现有的 User.* 参数拼成一行，参数名对不上时直接打出来对照。 */
-	FString DescribeUserParameters(UNiagaraSystem* System)
+	FString EmpoweredHitDescribeUserParameters(UNiagaraSystem* System)
 	{
 		TArray<FNiagaraVariable> Parameters;
 		System->GetExposedParameters().GetParameters(Parameters);
@@ -38,7 +42,7 @@ namespace
 	 * 名字还是找不到就什么都不做）→ NS 生成了但位置参数没喂进去，粒子会趴在世界原点炸，看不出原因。
 	 * 和 UAnimNotifyState_BladeTrail / UGA_ThreeHitPassive 里那两份判断同一个道理。
 	 */
-	void WarnIfMissingParameter(UNiagaraSystem* System, const FName& ParameterName)
+	void EmpoweredHitWarnIfMissingParameter(UNiagaraSystem* System, const FName& ParameterName)
 	{
 		TArray<FNiagaraVariable> Parameters;
 		System->GetExposedParameters().GetParameters(Parameters);
@@ -48,7 +52,7 @@ namespace
 		if (!bFound)
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[EmpoweredHit] NS %s 里没有参数 %s → 命中点喂不进去。系统里现有的 user parameter：%s"),
-				*GetNameSafe(System), *ParameterName.ToString(), *DescribeUserParameters(System));
+				*GetNameSafe(System), *ParameterName.ToString(), *EmpoweredHitDescribeUserParameters(System));
 		}
 	}
 }
@@ -80,7 +84,7 @@ bool UGC_EmpoweredHit::OnExecute_Implementation(AActor* MyTarget, const FGamepla
 	UNiagaraSystem* System = HitSystem.LoadSynchronous();
 	if (System)
 	{
-		WarnIfMissingParameter(System, ImpactParameter);
+		EmpoweredHitWarnIfMissingParameter(System, ImpactParameter);
 
 		// 爆在命中点上，不挂到谁身上：这一下就是「打实了」的即时反馈，挂在目标身上会跟着跑。
 		// bAutoDestroy 让它自己收（NS 按 burst 配就行；emitter 要是设成无限循环会漏组件，

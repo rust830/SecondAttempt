@@ -4,6 +4,7 @@
 
 #include "AbilitySystemComponent.h"
 #include "Blueprint/UserWidget.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Actor.h"
 
 #include "GAS/HeroCombatAttributeSet.h"
@@ -15,9 +16,58 @@ void UHeroOverlayHealthComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// 先挂点、再绑数据。两件事互不依赖，但先摆好位置能避免「第一帧血条在默认位置闪一下」。
+	AttachToOwnerMeshSocket();
+
 	// SetWidget / InitWidget 在 Super::BeginPlay 里已经跑完，所以 GetUserWidgetObject() 在这里是有效的。
 	// 默认观察 Owner —— 敌人的血条组件挂在敌人自己身上，不用手配。
 	SetObservedActor(ObservedActorOverride ? ObservedActorOverride.Get() : GetOwner());
+}
+
+void UHeroOverlayHealthComponent::AttachToOwnerMeshSocket()
+{
+	// 显式关掉吸附（None）：完全按蓝图里配的父子关系走。
+	if (OwnerMeshSocketName.IsNone())
+	{
+		return;
+	}
+
+	const AActor* Owner = GetOwner();
+	if (!Owner)
+	{
+		return;
+	}
+
+	// 用 FindComponentByClass 而不是 Cast<ACharacter>->GetMesh()：
+	// 敌人 / 小兵 / 以后可能的纯装饰演员都可能是别的类，能查出骨骼就够。
+	USkeletalMeshComponent* OwnerMesh = Owner->FindComponentByClass<USkeletalMeshComponent>();
+	if (!OwnerMesh)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("%s：想吸附到插槽 '%s'，但 %s 上没有 SkeletalMeshComponent。保留蓝图里配的挂位。"),
+			*GetName(), *OwnerMeshSocketName.ToString(), *GetNameSafe(Owner));
+		return;
+	}
+
+	// 插槽不存在时必须【只警告不吸附】：AttachToComponent 传一个不存在的插槽名不会报错，
+	// 而是静默挂到 mesh 原点上 —— 表现就是「血条跑到脚底」，比直接不挂更难查。
+	if (!OwnerMesh->DoesSocketExist(OwnerMeshSocketName))
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("%s：%s 的骨骼上没有插槽 '%s'（拼写不对？还是插槽建在别的骨架上了？）。保留蓝图里配的挂位。"),
+			*GetName(), *GetNameSafe(OwnerMesh), *OwnerMeshSocketName.ToString());
+		return;
+	}
+
+	// SnapToTargetNotIncludingScale：把相对变换整体对齐到插槽，这正是「吸附」的语义 ——
+	// 位置由骨骼决定，不再叠加蓝图里手填的那份偏移（两处偏移打架是这类血条最难查的问题）。
+	AttachToComponent(OwnerMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale, OwnerMeshSocketName);
+
+	// 需要微调就叠这个，而不是回头去动插槽。
+	if (!SocketOffset.IsNearlyZero())
+	{
+		SetRelativeLocation(SocketOffset);
+	}
 }
 
 void UHeroOverlayHealthComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)

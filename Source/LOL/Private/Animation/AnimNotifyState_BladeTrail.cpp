@@ -18,14 +18,19 @@ namespace
 		return bRight ? TEXT("右手") : TEXT("左手");
 	}
 
+	// 下面两个 helper 名字里的文件前缀是必须的，别改回 HasSocket / DescribeUserParameters：
+	// unity build 会把多个 .cpp 合进同一个 Module.LOL.N.cpp，匿名 namespace 只挡【跨 TU】的冲突，
+	// 合进一个 TU 之后同签名的函数就是重定义（C2084）。GA_ThreeHitPassive / GC_EmpoweredHit
+	// 里各有一份同样的实现，谁跟谁同批是 UBT 按文件名分批决定的，不受这里控制。
+
 	/** 插槽和骨骼都算数：GetSocketLocation 对骨骼名同样有效。 */
-	bool HasSocket(const USkeletalMeshComponent* MeshComp, const FName& SocketName)
+	bool BladeTrailHasSocket(const USkeletalMeshComponent* MeshComp, const FName& SocketName)
 	{
 		return MeshComp->DoesSocketExist(SocketName) || MeshComp->GetBoneIndex(SocketName) != INDEX_NONE;
 	}
 
 	/** 把系统里现有的 User.* 参数拼成一行，参数名对不上时直接打出来对照。 */
-	FString DescribeUserParameters(const UNiagaraSystem* System)
+	FString BladeTrailDescribeUserParameters(const UNiagaraSystem* System)
 	{
 		TArray<FNiagaraVariable> Parameters;
 		System->GetExposedParameters().GetParameters(Parameters);
@@ -75,7 +80,7 @@ UNiagaraComponent* UAnimNotifyState_BladeTrail::SpawnTrail(USkeletalMeshComponen
 
 	// 插槽不存在时 GetSocketLocation 会静默返回组件位置 —— 拖尾会从角色原点长出来，看不出是配置错的，
 	// 必须当场报出来。改 SocketSet，或者切到 Custom 手填名字。
-	if (!HasSocket(MeshComp, BaseSocket) || !HasSocket(MeshComp, TipSocket))
+	if (!BladeTrailHasSocket(MeshComp, BaseSocket) || !BladeTrailHasSocket(MeshComp, TipSocket))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[BladeTrail] %s：%s 上找不到插槽 %s / %s → 这一侧不生成拖尾"),
 			Hand, *GetNameSafe(MeshComp->GetSkeletalMeshAsset()), *BaseSocket.ToString(), *TipSocket.ToString());
@@ -94,7 +99,7 @@ UNiagaraComponent* UAnimNotifyState_BladeTrail::SpawnTrail(USkeletalMeshComponen
 	if (!HasParameter(BaseUserParameter) || !HasParameter(TipUserParameter))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[BladeTrail] %s：NS 里没有参数 %s / %s → 坐标喂不进去，拖尾不会动。系统里现有的 user parameter：%s"),
-			Hand, *BaseUserParameter.ToString(), *TipUserParameter.ToString(), *DescribeUserParameters(System));
+			Hand, *BaseUserParameter.ToString(), *TipUserParameter.ToString(), *BladeTrailDescribeUserParameters(System));
 	}
 
 	UNiagaraComponent* Component = UNiagaraFunctionLibrary::SpawnSystemAttached(

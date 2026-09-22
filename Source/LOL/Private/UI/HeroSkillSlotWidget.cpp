@@ -15,6 +15,21 @@ void UHeroSkillSlotWidget::ApplySlotView(const FSkillSlotView& View)
 {
 	SlotView = View;
 
+	// ---------------------------------------------------------------------
+	// 可见性：预留位（被动 / 格挡，配了 bHideWhenUnavailable 而能力还没授予）整格收起。
+	//
+	// 只在【第一次】记下 WBP 里配的可见性，恢复时回到它，而不是硬写 Visible ——
+	// 否则会把美术在 WBP 里设的 HitTestInvisible 之类冲掉。
+	//
+	// 判据是 Controller 算好的 View.bHidden，这里不做第二次判断（同 ResolveSlotState 的理由）。
+	// ---------------------------------------------------------------------
+	if (!bAuthoredVisibilityCaptured)
+	{
+		AuthoredVisibility = GetVisibility();
+		bAuthoredVisibilityCaptured = true;
+	}
+	SetVisibility(View.bHidden ? ESlateVisibility::Collapsed : AuthoredVisibility);
+
 	if (IconImage && View.Icon)
 	{
 		// 只在有图标时设置：Icon 为空（还没绑上 ASC / 配置没填）时保留 WBP 里的占位图，
@@ -22,9 +37,19 @@ void UHeroSkillSlotWidget::ApplySlotView(const FSkillSlotView& View)
 		IconImage->SetBrushFromTexture(View.Icon, /*bMatchSize=*/false);
 	}
 
-	if (KeyLabelText && !View.KeyLabel.IsEmpty())
+	if (KeyLabelText)
 	{
-		KeyLabelText->SetText(View.KeyLabel);
+		// 被动【按不出来】，所以不画键位：不管 WBP 模板里留了什么占位文字，一律清掉。
+		// 主动 / 格挡走原来的规则 —— 只在 KeyLabel 非空时写，空的时候保留模板占位，
+		// 免得到配置加载完之前先闪一下空白（见 IconImage 那条同款注释）。
+		if (View.Kind == EHeroHUDSlotKind::Passive)
+		{
+			KeyLabelText->SetText(FText::GetEmpty());
+		}
+		else if (!View.KeyLabel.IsEmpty())
+		{
+			KeyLabelText->SetText(View.KeyLabel);
+		}
 	}
 
 	// ---------------------------------------------------------------------

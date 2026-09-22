@@ -343,8 +343,13 @@ void UHeroHUDController::ResetToUnboundState()
 		Reset.Icon = Old.Icon;
 		Reset.KeyLabel = Old.KeyLabel;
 		Reset.DisplayName = Old.DisplayName;
+		Reset.Kind = Old.Kind;
 		Reset.State = ESkillSlotState::Disabled;
 		Reset.BlockReasons = static_cast<int32>(ESkillSlotBlockReason::NoAbility);
+
+		// 未绑上 = 这个槽上一定没有能力 → 预留位该隐身就隐身。判据走同一个函数。
+		const FHeroHUDSlotEntry* Entry = SlotConfig ? SlotConfig->FindEntry(Index) : nullptr;
+		Reset.bHidden = IsReservedSlotHidden(Entry, /*bHasAbility=*/false);
 
 		CachedSlots[Index] = Reset;
 	}
@@ -376,8 +381,16 @@ void UHeroHUDController::SetSlotConfig(UHeroHUDSlotConfig* InConfig)
 
 	for (int32 Index = 0; Index < CachedSlots.Num(); ++Index)
 	{
-		CachedSlots[Index] = FSkillSlotView();
-		CachedSlots[Index].SlotIndex = Index;
+		FSkillSlotView New;
+		New.SlotIndex = Index;
+
+		const FHeroHUDSlotEntry* Entry = SlotConfig ? SlotConfig->FindEntry(Index) : nullptr;
+		ApplyEntryStatic(New, Entry);
+		// 刚换配置、还没重算能力归属：按「暂时没有能力」算，预留位先隐身。
+		// 真要是在场就重算，下面 BindSelf + BroadcastInitialValues 会覆盖成准确值。
+		New.bHidden = IsReservedSlotHidden(Entry, /*bHasAbility=*/false);
+
+		CachedSlots[Index] = New;
 	}
 
 	if (BoundASC.IsValid())
@@ -406,12 +419,42 @@ void UHeroHUDController::EnsureSlotCacheSize()
 		// 默认构造出来的 SlotIndex 是 INDEX_NONE，所以这里能认出「新格」。
 		if (CachedSlots[Index].SlotIndex != Index)
 		{
-			CachedSlots[Index] = FSkillSlotView();
-			CachedSlots[Index].SlotIndex = Index;
-			CachedSlots[Index].State = ESkillSlotState::Disabled;
-			CachedSlots[Index].BlockReasons = static_cast<int32>(ESkillSlotBlockReason::NoAbility);
+			// 新格先按「没绑上 ASC」填一份：这样即使第一个 RebuildSlot 还没跑，
+			// PullHUDState() 拿到的也是一份自洽的投影（预留位该隐身的已经隐身）。
+			FSkillSlotView New;
+			New.SlotIndex = Index;
+			New.State = ESkillSlotState::Disabled;
+			New.BlockReasons = static_cast<int32>(ESkillSlotBlockReason::NoAbility);
+
+			const FHeroHUDSlotEntry* Entry = SlotConfig ? SlotConfig->FindEntry(Index) : nullptr;
+			ApplyEntryStatic(New, Entry);
+			New.bHidden = IsReservedSlotHidden(Entry, /*bHasAbility=*/false);
+
+			CachedSlots[Index] = New;
 		}
 	}
+}
+
+void UHeroHUDController::ApplyEntryStatic(FSkillSlotView& View, const FHeroHUDSlotEntry* Entry) const
+{
+	if (!Entry)
+	{
+		return;
+	}
+
+	View.Icon = Entry->Icon;
+	View.KeyLabel = Entry->KeyLabel;
+	View.DisplayName = Entry->DisplayName;
+	View.Kind = Entry->Kind;
+}
+
+bool UHeroHUDController::IsReservedSlotHidden(const FHeroHUDSlotEntry* Entry, bool bHasAbility)
+{
+	// 「预留位」= 配置里声明了「没能力就别出现」，而这一刻确实还没有能力。
+	//
+	// 反过来不成立的地方要注意：没有 Entry（越界 / 配置为空）时【不隐藏】——
+	// 那是配置坏了，应该看得见（好排查），而不是安静地少一格。
+	return Entry && Entry->bHideWhenUnavailable && !bHasAbility;
 }
 
 // ===========================================================================
@@ -543,12 +586,7 @@ void UHeroHUDController::RebuildSlot(int32 SlotIndex, bool bForceBroadcast)
 
 	// 静态表现每次都带上：Widget 因此完全不需要认识 UHeroHUDSlotConfig
 	// （那份资产持有 FGameplayTag，会把它拖进 GAS 依赖）。
-	if (Entry)
-	{
-		New.Icon = Entry->Icon;
-		New.KeyLabel = Entry->KeyLabel;
-		New.DisplayName = Entry->DisplayName;
-	}
+	ApplyEntryStatic(New, Entry);
 
 	ESkillSlotBlockReason Reasons = ESkillSlotBlockReason::None;
 
@@ -631,6 +669,13 @@ void UHeroHUDController::RebuildSlot(int32 SlotIndex, bool bForceBroadcast)
 			}
 		}
 	}
+
+	// ---- ⑤ 可见性 ----
+	//
+	// 放在最后算（要等 bHasAbility 定下来），且【和 State 分开】：State 说的是「能不能放」，
+	// bHidden 说的是「要不要出现在屏幕上」，两件事不该互相污染 ——
+	// 否则「隐身槽位」的语义会随着灰化优先级的调整被顺手改掉。
+	New.bHidden = IsReservedSlotHidden(Entry, New.bHasAbility);
 
 	New.BlockReasons = static_cast<int32>(Reasons);
 	New.State = ResolveSlotState(New.bHasAbility, Reasons);

@@ -94,6 +94,26 @@ python Tools/vs_show.py open-changed --minutes 10
    ```
 2. **别对同一个文件并行发多个编辑操作** —— 会互相覆盖。串行。
 
+### 忘了 `prepare` 就先改了文件？用 git 把基线补回来
+
+`diff` 比的是 `Saved/AgentDiff/<相对路径>.before`（`prepare` / `snapshot` 存下来的）和磁盘当前内容。
+**先编辑后 prepare 是没用的** —— 那会把改完的内容当成基线，`diff` 显示"零处不同"。
+
+只要文件在 git 里、且 `HEAD` 就是编辑前的状态，基线可以现造：
+
+```bash
+dst="Saved/AgentDiff/$f.before"
+mkdir -p "$(dirname "$dst")"
+git show "HEAD:$f" > "$dst"
+python Tools/vs_show.py diff "$f"
+```
+
+**行尾不会成为问题**：`disk_text()` 用 `open(..., encoding="utf-8")` 读，Python 的 universal newlines
+会把 CRLF 归一成 LF，所以 LF 的 git 对象和 CRLF 的工作区文件能正常比对（否则会整篇标红）。
+
+前提是那个文件**相对 HEAD 没有再叠加别的未提交改动** —— 有的话基线会带上它们，diff 就不再是"本次改动"。
+先 `git diff --numstat HEAD -- <file>` 看一眼这个文件干不干净。
+
 ## 边界
 
 - VS 2022 **没有**给第三方 agent 的 inline diff 扩展接口。能做到的最接近形态就是

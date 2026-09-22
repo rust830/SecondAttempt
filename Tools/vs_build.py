@@ -232,7 +232,10 @@ def trigger_build(dte, vs_config: str | None) -> tuple[int, str]:
     if not sol.IsOpen:
         return -1, "no solution open in Visual Studio"
     sb = sol.SolutionBuild
-    if sb.BuildState == 1:
+    # DTE 的 vsBuildState 是【从 1 开始】的：1 = NotStarted，2 = InProgress，3 = Done。
+    # 这里必须比 2。写成 == 1 会把「还没构建过」当成「正在构建」，脚本就永远不动手
+    # （症状：明明没有 MSBuild / UBT 子进程，却一直报 a build is already running）。
+    if sb.BuildState == 2:
         return -2, "a build is already running in Visual Studio"
     try:
         if vs_config:

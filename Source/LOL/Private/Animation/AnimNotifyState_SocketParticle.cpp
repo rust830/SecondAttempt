@@ -10,8 +10,14 @@
 
 namespace
 {
-	/** 插槽和骨骼都算数：GetSocketLocation 对骨骼名同样有效。 */
-	bool HasSocket(const USkeletalMeshComponent* MeshComp, const FName& SocketName)
+	/**
+	 * 插槽和骨骼都算数：GetSocketLocation 对骨骼名同样有效。
+	 *
+	 * ⚠ 名字里的文件前缀是必须的，别改回 HasSocket：unity build 会把多个 .cpp 合进同一个
+	 * Module.LOL.N.cpp，匿名 namespace 只挡【跨 TU】冲突，合进一个 TU 之后同签名的函数
+	 * 就是重定义（C2084）。同样的实现还有 AnimNotifyState_BladeTrail / GA_ThreeHitPassive 两份。
+	 */
+	bool SocketParticleHasSocket(const USkeletalMeshComponent* MeshComp, const FName& SocketName)
 	{
 		return MeshComp->DoesSocketExist(SocketName) || MeshComp->GetBoneIndex(SocketName) != INDEX_NONE;
 	}
@@ -76,7 +82,7 @@ void UAnimNotifyState_SocketParticle::NotifyBegin(USkeletalMeshComponent* MeshCo
 UParticleSystemComponent* UAnimNotifyState_SocketParticle::SpawnOne(USkeletalMeshComponent* MeshComp, UParticleSystem* System, bool bRight) const
 {
 	const FName SocketName = bRight ? SocketRight : SocketLeft;
-	if (!HasSocket(MeshComp, SocketName))
+	if (!SocketParticleHasSocket(MeshComp, SocketName))
 	{
 		// 插槽不存在时 SpawnEmitterAttached 会静默把粒子挂在组件原点 —— 看不出是配置错的，必须当场报出来。
 		UE_LOG(LogTemp, Warning, TEXT("[SocketParticle] %s 上找不到插槽 %s → 这一侧不生成"),

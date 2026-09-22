@@ -85,4 +85,15 @@ protected:
 
 	UPROPERTY(BlueprintReadOnly, Category = "HUD")
 	int32 SlotIndex = INDEX_NONE;
+
+	/**
+	 * WBP 里配的可见性（首次 ApplySlotView 时记下来）。
+	 *
+	 * 为什么记而不是写死 Visible：`bHidden` 只负责「收起来」，恢复时要回到美术在 WBP 里
+	 * 配的那个值 —— 他可能故意设成 HitTestInvisible / SelfHitTestInvisible。
+	 * 直接写 Visible 会把设计意图冲掉，而且这种冲突只在运行时看得见。
+	 */
+	ESlateVisibility AuthoredVisibility = ESlateVisibility::Visible;
+
+	bool bAuthoredVisibilityCaptured = false;
 };

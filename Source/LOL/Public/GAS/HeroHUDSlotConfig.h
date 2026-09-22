@@ -9,6 +9,9 @@
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
 #include "GameplayTagContainer.h"
+// 依赖方向是 GAS → UI，不是反过来：EHeroHUDSlotKind 定义在 UI/HUDTypes.h（那里零 GAS 类型）。
+// 方向必须是这个 —— GAS 层知道「UI 怎么分类槽位」，UI 层不知道「标签叫什么」。
+#include "UI/HUDTypes.h"
 #include "HeroHUDSlotConfig.generated.h"
 
 class UTexture2D;
@@ -30,6 +33,25 @@ struct FHeroHUDSlotEntry
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "HUD")
 	FGameplayTag CooldownTag;
+
+	/**
+	 * 种类：主动 / 被动 / 格挡。纯分类，唯一的影响是 Widget 不画被动的键位标注。
+	 * 加被动技能不用改 C++ —— 在数组里插一条 Kind=Passive 就行。
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "HUD")
+	EHeroHUDSlotKind Kind = EHeroHUDSlotKind::Active;
+
+	/**
+	 * 【预留位的开关】没能力时整格收起，而不是画一个灰格子。
+	 *
+	 * 为什么需要它：被动 / 格挡这类槽位现在可能还没实装，以后才加。要是现在就往数组里
+	 * 占好位置，UI 上会多出两个永远灰着的空格子。勾上这个，没授权时自动隐身，
+	 * 等哪天能力真的授予了（比如被动挂上 CD 系统）就自己出现 —— **不用回来改这份资产**。
+	 *
+	 * 默认 false：六个主动槽的既有行为一个字节都没变。
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "HUD")
+	bool bHideWhenUnavailable = false;
 
 	/** 静态表现。Controller 会把这三个字段原样带进 FSkillSlotView。 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "HUD")

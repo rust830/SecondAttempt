@@ -79,6 +79,28 @@ enum class ESkillSlotBlockReason : uint8
 ENUM_CLASS_FLAGS(ESkillSlotBlockReason);
 
 /**
+ * 槽位的【种类】。纯粹是分类，不影响冷却/灰化的任何算法 —— 它的读者只有两个：
+ *   · Widget：被动槽不画键位标注（按不出来），Block 槽可以画成鼠标右键图标；
+ *   · 人：在 DA 里一眼看出这一条是主动还是预留的被动/格挡。
+ *
+ * 为什么不省掉它：这个字段是【可配置的】，不是 C++ 里 if (SlotTag == "Passive") 猜出来的。
+ * 加一个英雄带三个被动时，只需要在数组里多加三条 Kind=Passive，C++ 一行不动。
+ */
+UENUM(BlueprintType)
+enum class EHeroHUDSlotKind : uint8
+{
+	/** 按得出来的主动技能（Q / W / E / R / D / F）。默认值。 */
+	Active      UMETA(DisplayName = "Active"),
+	/**
+	 * 被动。常驻、按不出来 —— 但【可以有冷却】：转圈和秒数走的是同一条管道，
+	 * 唯一区别是不画键位（见 ESkillSlotBlockReason / Widget 的处理）。
+	 */
+	Passive     UMETA(DisplayName = "Passive"),
+	/** 另一个输入面的能力（鼠标右键的格挡）。语义同 Active，只是键位标注不是字母。 */
+	Block       UMETA(DisplayName = "Block"),
+};
+
+/**
  * 一个技能槽的完整 UI 视图。
  *
  * 静态表现（Icon / KeyLabel / DisplayName）也塞在这里，是【故意的】：这样 Widget 完全不需要认识
@@ -97,6 +119,22 @@ struct FSkillSlotView
 	/** false = 这个槽位上没有能力（映射表没配 / 没授权）。State 会是 Disabled。 */
 	UPROPERTY(BlueprintReadOnly, Category = "HUD")
 	bool bHasAbility = false;
+
+	/** 种类（主动 / 被动 / 格挡）。来自 DA，Controller 原样带出来，UI 自己决定怎么画。 */
+	UPROPERTY(BlueprintReadOnly, Category = "HUD")
+	EHeroHUDSlotKind Kind = EHeroHUDSlotKind::Active;
+
+	/**
+	 * 整格收起来（Collapsed），不是灰化。
+	 *
+	 * 【和 Disabled 不是一回事】：Disabled 说的是「槽位空」，UI 照样该画一个空框占位；
+	 * bHidden 说的是「这条根本没打算让人看见」—— 为预留的被动 / 格挡准备的。
+	 * 只由 DA 上的 `bHideWhenUnavailable` 决定，能力一挂上就自动出现，不需要回来改配置。
+	 *
+	 * 判据写在 Controller 里（Widget 不该有第二个判断，见 ResolveSlotState 的同款理由）。
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "HUD")
+	bool bHidden = false;
 
 	// ---- 静态表现（来自 UHeroHUDSlotConfig）----
 
@@ -155,6 +193,8 @@ struct FSkillSlotView
 	bool EqualsForUI(const FSkillSlotView& Other) const
 	{
 		return bHasAbility == Other.bHasAbility
+			&& Kind == Other.Kind
+			&& bHidden == Other.bHidden
 			&& State == Other.State
 			&& BlockReasons == Other.BlockReasons
 			&& Charges == Other.Charges

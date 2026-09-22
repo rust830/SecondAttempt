@@ -31,6 +31,7 @@ class UHeroCombatAttributeSet;
 class UHeroHUDSlotConfig;
 class UMyAbilitySystemComponent;
 class UWorld;
+struct FHeroHUDSlotEntry;
 
 /** 一条已注册的标签事件。解绑要 (Handle, Tag) 成对，所以要一起存。 */
 struct FHUDBoundTagEvent
@@ -205,6 +206,17 @@ private:
 
 	/** 保证 CachedSlots 的长度和 SlotConfig 对齐。 */
 	void EnsureSlotCacheSize();
+
+	/** 配置里的静态表现 → 视图。不含状态 —— 那部分要跟 ASC 说话。 */
+	void ApplyEntryStatic(FSkillSlotView& View, const FHeroHUDSlotEntry* Entry) const;
+
+	/**
+	 * 预留位的【唯一】判据：配了 bHideWhenUnavailable 且这个槽上现在没有能力。
+	 *
+	 * 做成 static 成员而不是文件内 free function：既能被四处共用，又不会像匿名 namespace
+	 * 那样在 unity build 合并 TU 时跟别的文件撞名（这个坑本项目已经踩过一次）。
+	 */
+	static bool IsReservedSlotHidden(const FHeroHUDSlotEntry* Entry, bool bHasAbility);
 
 	// ---- 状态 ----
 

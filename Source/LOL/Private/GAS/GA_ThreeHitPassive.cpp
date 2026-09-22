@@ -32,14 +32,19 @@ namespace
 	const FName PerfectWindowBaseParameter(TEXT("User.SwordBasePos"));
 	const FName PerfectWindowTipParameter(TEXT("User.SwordTipPos"));
 
+	// 本文件里这几个 helper 都带 ThreeHit 前缀，别改回通用名（HasSocket / DescribeUserParameters /
+	// WarnIfMissingParameter）：unity build 会把多个 .cpp 合进同一个 Module.LOL.N.cpp，匿名 namespace
+	// 只挡【跨 TU】的冲突，合进一个 TU 之后同签名就是重定义（C2084），而哪些文件同批由 UBT 按文件名
+	// 决定、不受这里控制。AnimNotifyState_BladeTrail / GC_EmpoweredHit 里各有一份同样的实现。
+
 	/** 插槽和骨骼都算数：GetSocketLocation 对骨骼名同样有效。和 UAnimNotifyState_BladeTrail 里那份判断一致。 */
-	bool HasSocket(const USkeletalMeshComponent* MeshComp, const FName& SocketName)
+	bool ThreeHitHasSocket(const USkeletalMeshComponent* MeshComp, const FName& SocketName)
 	{
 		return MeshComp->DoesSocketExist(SocketName) || MeshComp->GetBoneIndex(SocketName) != INDEX_NONE;
 	}
 
 	/** 把系统里现有的 User.* 参数拼成一行，参数名对不上时直接打出来对照。 */
-	FString DescribeUserParameters(UNiagaraSystem* System)
+	FString ThreeHitDescribeUserParameters(UNiagaraSystem* System)
 	{
 		TArray<FNiagaraVariable> Parameters;
 		System->GetExposedParameters().GetParameters(Parameters);
@@ -61,7 +66,7 @@ namespace
 	 * 名字还是找不到就什么都不做）→ 特效生成了但坐标喂不进去（光一直趴在原点），看不出原因。
 	 * 插槽名对不上也一样是静默的（GetSocketLocation 返回组件位置），所以这两处都当场核一遍并打日志。
 	 */
-	void WarnIfMissingParameter(UNiagaraSystem* System, const FName& ParameterName, const TCHAR* What)
+	void ThreeHitWarnIfMissingParameter(UNiagaraSystem* System, const FName& ParameterName, const TCHAR* What)
 	{
 		TArray<FNiagaraVariable> Parameters;
 		System->GetExposedParameters().GetParameters(Parameters);
@@ -71,7 +76,7 @@ namespace
 		if (!bFound)
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[Passive] %s：NS %s 里没有参数 %s → 坐标喂不进去。系统里现有的 user parameter：%s"),
-				What, *GetNameSafe(System), *ParameterName.ToString(), *DescribeUserParameters(System));
+				What, *GetNameSafe(System), *ParameterName.ToString(), *ThreeHitDescribeUserParameters(System));
 		}
 	}
 }
@@ -576,14 +581,14 @@ void UGA_ThreeHitPassive::ShowPerfectWindowVFX()
 	const FName TipSocket = PassiveData->PerfectWindowTipSocket;
 
 	// 插槽不存在时 GetSocketLocation 静默返回组件位置 —— 光会从角色原点扫出来，看不出是配错了。
-	if (!HasSocket(Mesh, BaseSocket) || !HasSocket(Mesh, TipSocket))
+	if (!ThreeHitHasSocket(Mesh, BaseSocket) || !ThreeHitHasSocket(Mesh, TipSocket))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[Passive] 完美窗口提示光：%s 上找不到插槽 %s / %s → 不生成"),
 			*GetNameSafe(Mesh->GetSkeletalMeshAsset()), *BaseSocket.ToString(), *TipSocket.ToString());
 		return;
 	}
-	WarnIfMissingParameter(System, PerfectWindowBaseParameter, TEXT("完美窗口提示光"));
-	WarnIfMissingParameter(System, PerfectWindowTipParameter, TEXT("完美窗口提示光"));
+	ThreeHitWarnIfMissingParameter(System, PerfectWindowBaseParameter, TEXT("完美窗口提示光"));
+	ThreeHitWarnIfMissingParameter(System, PerfectWindowTipParameter, TEXT("完美窗口提示光"));
 
 	// 挂在 mesh 上（不是挂在刀根插槽上）：坐标是每帧喂进去的，挂哪儿只影响第一帧和组件被回收时。
 	PerfectWindowVFX = UNiagaraFunctionLibrary::SpawnSystemAttached(

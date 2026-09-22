@@ -75,3 +75,10 @@ SecondAttempt/
 
 # ============ Agent 工作数据（本地记忆 / 会话日志，不进版本控制）============
 .workbuddy/
+
+# ============ 文档站构建产物 ============
+# docs/ 由 Tools/sync_docs.py 从根目录的 Markdown 生成，是中间产物 ——
+# 真值源永远在仓库根目录（GAS_*_Setup.md / CONVENTIONS.md / README.md）。
+# 所以 docs/ 里别放需要长期保留的文件，它会被同步覆盖。
+site/
+docs/
