@@ -1,7 +1,9 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "GAS/GC_DeathHarvestCast.h"
+#include "Audio/HeroAudioLibrary.h"
 #include "GAS/LOLGameplayTags.h"
+#include "GAS/LocalPlayerUtils.h"
 #include "GAS/MyDeathHarvestCameraModifier.h"
 #include "Camera/CameraModifier.h"
 #include "Camera/PlayerCameraManager.h"
@@ -9,6 +11,7 @@
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
+#include "Materials/MaterialInterface.h"   // GetNameSafe(Modifier->ScreenMaterial)：TObjectPtr<UMaterialInterface> 要先有完整定义
 #include "Particles/ParticleSystem.h"
 #include "Sound/SoundBase.h"
 
@@ -45,18 +48,16 @@ bool AGC_DeathHarvestCast::OnActive_Implementation(AActor* MyTarget, const FGame
 		UGameplayStatics::SpawnEmitterAtLocation(MyTarget->GetWorld(), VanishParticle,
 			FTransform(MyTarget->GetActorRotation(), MyTarget->GetActorLocation()));
 	}
-	if (VanishSound)
-	{
-		UGameplayStatics::PlaySoundAtLocation(this, VanishSound, MyTarget->GetActorLocation());
-	}
+	// 音效从事件表里取（Audio.DeathHarvest.Vanish / .Appear），这一类身上不再留音效属性。
+	UHeroAudioLibrary::PlayAt(this, LOLGameplayTags::Audio_DeathHarvestVanish, MyTarget->GetActorLocation());
 
 	// ③ 传送镜头只给主人：这条 cue 每台机器都会跑一次，只有施法者自己那一台该变屏幕。
-	if (const APawn* Pawn = Cast<APawn>(MyTarget))
+	//
+	// ★ 同 GC_Stealth：必须是「本地玩家本人」。用 Pawn->IsLocallyControlled() 的话，
+	//   单机下 Bot 放死亡收割也会把消失/现身的传送镜头挂到玩家相机上。详见 GAS/LocalPlayerUtils.h。
+	if (LOLLocalPlayer::IsLocalPlayerControlled(MyTarget))
 	{
-		if (Pawn->IsLocallyControlled())
-		{
-			ApplyLocalScreen(MyTarget, /*bOn=*/true);
-		}
+		ApplyLocalScreen(MyTarget, /*bOn=*/true);
 	}
 
 	return true;
@@ -81,10 +82,7 @@ bool AGC_DeathHarvestCast::OnRemove_Implementation(AActor* MyTarget, const FGame
 			UGameplayStatics::SpawnEmitterAtLocation(MyTarget->GetWorld(), AppearParticle,
 				FTransform(MyTarget->GetActorRotation(), MyTarget->GetActorLocation()));
 		}
-		if (AppearSound)
-		{
-			UGameplayStatics::PlaySoundAtLocation(this, AppearSound, MyTarget->GetActorLocation());
-		}
+		UHeroAudioLibrary::PlayAt(this, LOLGameplayTags::Audio_DeathHarvestAppear, MyTarget->GetActorLocation());
 	}
 
 	VanishTarget = nullptr;

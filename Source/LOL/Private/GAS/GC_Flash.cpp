@@ -1,6 +1,7 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "GAS/GC_Flash.h"
+#include "Audio/HeroAudioLibrary.h"
 #include "GAS/LOLGameplayTags.h"
 #include "Engine/World.h"
 #include "GameplayEffectTypes.h"
@@ -30,10 +31,8 @@ bool UGC_Flash::OnExecute_Implementation(AActor* MyTarget, const FGameplayCuePar
 		// Cascade：UParticleSystem + SpawnEmitterAtLocation（和 GC_ThrowDaggerHit 同一套写法）。
 		UGameplayStatics::SpawnEmitterAtLocation(World, FlashParticle, FTransform(FRotator::ZeroRotator, Location));
 	}
-	if (FlashSound)
-	{
-		UGameplayStatics::PlaySoundAtLocation(World, FlashSound, Location);
-	}
+	// 音效从事件表里取（Audio.Flash），这一类身上不再留音效属性。
+	UHeroAudioLibrary::PlayAt(World, LOLGameplayTags::Audio_Flash, Location);
 
 	return true;
 }

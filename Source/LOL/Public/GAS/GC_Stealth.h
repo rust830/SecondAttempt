@@ -11,6 +11,8 @@ class UCameraModifier;
 class UMaterialInterface;
 class UMeshComponent;
 class UMyStealthCameraModifier;
+class UNiagaraComponent;
+class UNiagaraSystem;
 class UParticleSystem;
 class UParticleSystemComponent;
 class USoundBase;
@@ -61,20 +63,21 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Stealth|Visual")
 	TObjectPtr<UParticleSystem> ExitParticle;
 
-	/** 进入隐身的一次性音效（可空）。Paragon: Kallari_Effort_Ability_Q_Enter。 */
-	UPROPERTY(EditDefaultsOnly, Category = "Stealth|Visual")
-	TObjectPtr<USoundBase> EnterSound;
-
-	/** 破隐的一次性音效（可空）。Paragon: Kallari_Effort_Ability_Q_Exit。 */
-	UPROPERTY(EditDefaultsOnly, Category = "Stealth|Visual")
-	TObjectPtr<USoundBase> ExitSound;
-
 	/**
 	 * 隐身期间挂在两把刀根插槽上的同一个 Cascade 粒子（可空，左右各生成一份）。
 	 * 和 LoopParticle 一样只给主人看：敌人能看见刀上挂着常驻特效的话，隐身本身就白做了。
 	 */
 	UPROPERTY(EditDefaultsOnly, Category = "Stealth|Sword")
 	TObjectPtr<UParticleSystem> SwordParticle;
+
+	/**
+	 * 空手形态（State.Form.Unarmed）下不生成刀根粒子。
+	 * 【为什么默认开】刀都已经收鞘了，刀根还挂着刀光 = 本 bug 的直接来源
+	 * （2026-10-03：空手隐身时 sword 特效残留，根因就是这里不判形态）。
+	 * 空手想给隐身配专属特效的话，以后走 Unarmed 系列字段，别复用刀根插槽。
+	 */
+	UPROPERTY(EditDefaultsOnly, Category = "Stealth|Sword")
+	bool bSwordParticleRequiresArmed = true;
 
 	/** SwordParticle 挂的两个插槽（Kallari 是双刀）。 */
 	UPROPERTY(EditDefaultsOnly, Category = "Stealth|Sword")
@@ -144,6 +147,45 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Stealth|Countdown")
 	FVector CountdownScale = FVector(1.f);
 
+	// ---------------------------------------------------------------------
+	// 空手形态的双手充能（2026-10-04）
+	// ---------------------------------------------------------------------
+
+	/**
+	 * 空手形态（State.Form.Unarmed）隐身期间，双手上各挂一份的充能特效（Niagara）。
+	 *
+	 * 【为什么是独立字段而不是复用 SwordParticle】
+	 * ① 刀根插槽 sword_base_l/r 在空手时没有意义（刀已收鞘），挂上去就是「没刀却有刀光」——
+	 *    这里挂的是 hand_l / hand_r，是手本身的位置；
+	 * ② 那边是 Cascade（UParticleSystem），这边是新做的 Niagara（要 Ribbon/分层火焰那套表现），
+	 *    两种资产类型不同，塞不进同一个字段。
+	 *
+	 * 留空 = 空手隐身时手上不加任何东西（和加这个字段之前的行为一致）。
+	 */
+	UPROPERTY(EditDefaultsOnly, Category = "Stealth|Unarmed")
+	TSoftObjectPtr<UNiagaraSystem> UnarmedChargeSystem;
+
+	/** 充能特效挂的两个插槽（空手就是左右手）。 */
+	UPROPERTY(EditDefaultsOnly, Category = "Stealth|Unarmed")
+	FName UnarmedSocketLeft = TEXT("hand_l");
+
+	UPROPERTY(EditDefaultsOnly, Category = "Stealth|Unarmed")
+	FName UnarmedSocketRight = TEXT("hand_r");
+
+	/**
+	 * 充能特效是否只给主人看。默认 true —— 和 SwordParticle 同一个理由：
+	 * 隐身期间手上亮着，敌人能看见的话隐身本身就白做了。
+	 */
+	UPROPERTY(EditDefaultsOnly, Category = "Stealth|Unarmed")
+	bool bUnarmedChargeOnlyOwnerSee = true;
+
+	/**
+	 * 破隐后等多久强拆充能组件。NS 的 emitter 要是设成无限循环，auto destroy 永远等不到；
+	 * 这里先 Deactivate 让已有粒子自然收掉，再挂一个延迟销毁兜底。
+	 */
+	UPROPERTY(EditDefaultsOnly, Category = "Stealth|Unarmed", meta = (ClampMin = "0.05", Units = "s"))
+	float UnarmedChargeTeardownDelay = 1.f;
+
 	/** 本地屏幕效果用的相机修改器类。默认 UMyStealthCameraModifier，一般不用改。 */
 	UPROPERTY(EditDefaultsOnly, Category = "Stealth|Screen")
 	TSubclassOf<UCameraModifier> ScreenModifierClass;
@@ -172,6 +214,10 @@ private:
 	/** 倒计时光环组件（OnActive 创建，OnRemove/EndPlay 销毁）。 */
 	UPROPERTY(Transient)
 	TObjectPtr<UParticleSystemComponent> CountdownComp;
+
+	/** 空手隐身时双手上的充能特效组件（OnActive 创建，OnRemove/EndPlay 销毁）。 */
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UNiagaraComponent>> UnarmedChargeComps;
 
 	/** 光环倍率只算一次算完就锁住（隐身时长在挂 GE 那一刻就定死了）。 */
 	bool bCountdownScaled = false;
@@ -207,7 +253,6 @@ private:
 	void SpawnOneShotParticle(AActor* Target, UParticleSystem* Particle) const;
 
 	/** 在 MyTarget 位置播一个 2D/3D 音效（可空，静默跳过）。 */
-	void SpawnSound(AActor* Target, USoundBase* Sound) const;
 
 	/** 销毁循环粒子组件（幂等，OnRemove 和 EndPlay 都会调）。 */
 	void DestroyLoopParticle();
@@ -215,11 +260,31 @@ private:
 	/** 循环粒子 / 刀根粒子 / 光环统一挂在角色网格上跟着身体走；没有网格就退回 root。 */
 	USceneComponent* ResolveAttachComponent(AActor* Target) const;
 
-	/** 在 SwordSocketLeft / SwordSocketRight 上各生成一份 SwordParticle（先清旧的，可重入）。 */
-	void SpawnSwordParticles(USceneComponent* AttachTo);
+	/**
+	 * 在 SwordSocketLeft / SwordSocketRight 上各生成一份 SwordParticle（先清旧的，可重入）。
+	 * bSwordParticleRequiresArmed 时读 Target 的 State.Form.Unarmed——空手直接跳过（清旧照做）。
+	 */
+	void SpawnSwordParticles(AActor* Target, USceneComponent* AttachTo);
+
+	/** 读 Target 的 State.Form.Unarmed（与 GC_EmpoweredAttack::IsTargetUnarmed 同判据）。 */
+	bool IsTargetUnarmed(AActor* Target) const;
 
 	/** 销毁两把刀上的粒子组件（幂等）。 */
 	void DestroySwordParticles();
+
+	/**
+	 * 空手形态下在 hand_l / hand_r 上各挂一份 UnarmedChargeSystem（幂等，可重入）。
+	 * 持刀形态 / 没配系统 / 目标不是空手 → 什么都不做（清旧照做）。
+	 */
+	void SpawnUnarmedCharge(AActor* Target, USceneComponent* AttachTo);
+
+	/**
+	 * 停掉双手充能并挂上延迟销毁（幂等）。
+	 *
+	 * 先 Deactivate 再延时销毁，让已经生成的粒子自己收掉 —— 直接 DestroyComponent 会把
+	 * 正在亮着的火苗硬切掉，破隐那一瞬间手上一闪。
+	 */
+	void DestroyUnarmedCharge();
 
 	/** 生成倒计时光环并打开 tick（倍率要等 GE 进 ActiveGameplayEffects 才读得到，见 Tick）。 */
 	void SpawnCountdown(USceneComponent* AttachTo);

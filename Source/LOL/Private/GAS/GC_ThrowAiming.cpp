@@ -1,7 +1,9 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "GAS/GC_ThrowAiming.h"
+#include "Audio/HeroAudioLibrary.h"
 #include "GAS/LOLGameplayTags.h"
+#include "GAS/LocalPlayerUtils.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/Pawn.h"
@@ -20,29 +22,28 @@ AGC_ThrowAiming::AGC_ThrowAiming()
 	// 不允许重复 OnActive 的话第二次瞄准就没有轮廓了。
 	bAllowMultipleOnActiveEvents = true;
 
-	// 默认指向 Paragon 的 E 技能抬手语音。软引用：默认值只是路径，编辑器里随时换。
-	AimingSound = TSoftObjectPtr<USoundBase>(
-		FSoftObjectPath(TEXT("/Game/ParagonKallari/Audio/Cues/Kallari_Effort_Ability_E_Raise.Kallari_Effort_Ability_E_Raise")));
+	// 音效：这一类身上不再留 AimingSound，一律走 UHeroAudioConfig 的事件表（Audio.ThrowAiming）。
 }
 
 bool AGC_ThrowAiming::OnActive_Implementation(AActor* MyTarget, const FGameplayCueParameters& Parameters)
 {
-	// 只给本地控制端：轮廓和抬手声都是「我在瞄准」的反馈，敌人不该看到/听到别人在瞄谁。
-	const APawn* Pawn = Cast<APawn>(MyTarget);
-	if (!Pawn || !Pawn->IsLocallyControlled())
+	// 只给本地玩家本人：轮廓和抬手声都是「我在瞄准」的反馈，敌人不该看到/听到别人在瞄谁。
+	//
+	// ★ 不能用 Pawn->IsLocallyControlled()：它在单机下对 Bot 的 Controller 也返回 true，
+	//   于是 AI 抬手瞄准时玩家屏幕上会冒出对手的轮廓 + 听到别人的抬手声。
+	//   详见 GAS/LocalPlayerUtils.h。
+	if (!LOLLocalPlayer::IsLocalPlayerControlled(MyTarget))
 	{
 		return true;   // 不是失败，只是本端不需要这个表现
 	}
 
 	// bAllowMultipleOnActiveEvents + 预测重放会让 OnActive 连着来两次，声音不能跟着叠两下。
 	// 连续两次 OnActive 之间没有 OnRemove，所以这个标记正好区分「真·重新瞄准」和「同一帧重放」。
+	// 音效走事件表（Audio.ThrowAiming）；外面这个标记保的是「一次瞄准只响一次」。
 	if (!bPlayedAimingSound)
 	{
-		if (USoundBase* Sound = AimingSound.LoadSynchronous())
-		{
-			bPlayedAimingSound = true;
-			UGameplayStatics::PlaySoundAtLocation(this, Sound, MyTarget->GetActorLocation());
-		}
+		bPlayedAimingSound = true;
+		UHeroAudioLibrary::PlayAt(this, LOLGameplayTags::Audio_ThrowAiming, MyTarget->GetActorLocation());
 	}
 
 	if (!ReticleFX)

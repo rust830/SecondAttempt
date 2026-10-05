@@ -5,11 +5,13 @@
 #include "AbilitySystemComponent.h"
 #include "Abilities/GameplayAbility.h"
 #include "Engine/World.h"
+#include "GameFramework/Actor.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/PlayerState.h"
 #include "TimerManager.h"
 
+#include "GAS/HeroAttributePanelConfig.h"
 #include "GAS/HeroCombatAttributeSet.h"
 #include "GAS/HeroHUDSlotConfig.h"
 #include "GAS/LOLGameplayTags.h"
@@ -99,6 +101,13 @@ void UHeroHUDController::TryBindHUD()
 			TEXT("在 BP_LOLPlayerController 上设 HUDSlotConfig。"));
 	}
 
+	if (!AttributePanelConfig)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("UHeroHUDController: 没有配 UHeroAttributePanelConfig，属性面板会是空的。")
+			TEXT("在 BP_LOLPlayerController 上设 AttributePanelConfig。"));
+	}
+
 	BroadcastInitialValues();   // 顺手填满缓存 + 通知在场订阅者
 	UpdateCooldownTicker();     // 重生 / 重连时可能本来就在冷却
 }
@@ -111,34 +120,53 @@ void UHeroHUDController::BindSelf()
 		return;
 	}
 
-	// ① 属性：血 / 能量。
+	// ① 属性：血 / 能量。四条绑到【同一个】回调上（见 OnSelfVitalsAttributeChanged）。
 	//    用 GetGameplayAttributeValueChangeDelegate，【不用 OnRep_*】——
 	//    listen server 上主机是权威端，属性是直接写进去的，OnRep 根本不触发。
 	//    用 OnRep 的话症状是「主机看不到自己的血条动」，而且只在多人下才暴露。
-	HealthHandle = ASC->GetGameplayAttributeValueChangeDelegate(UHeroCombatAttributeSet::GetHealthAttribute())
-		.AddUObject(this, &UHeroHUDController::OnHealthAttributeChanged);
-	MaxHealthHandle = ASC->GetGameplayAttributeValueChangeDelegate(UHeroCombatAttributeSet::GetMaxHealthAttribute())
-		.AddUObject(this, &UHeroHUDController::OnMaxHealthAttributeChanged);
-	EnergyHandle = ASC->GetGameplayAttributeValueChangeDelegate(UHeroCombatAttributeSet::GetEnergyAttribute())
-		.AddUObject(this, &UHeroHUDController::OnEnergyAttributeChanged);
-	MaxEnergyHandle = ASC->GetGameplayAttributeValueChangeDelegate(UHeroCombatAttributeSet::GetMaxEnergyAttribute())
-		.AddUObject(this, &UHeroHUDController::OnMaxEnergyAttributeChanged);
+	//
+	//    这四条的定义在属性集里（GetVitalsAttributes），和下面 Observed 通道共用一份 ——
+	//    以前是两处各写一份同样的列表，加一条资源时漏改一处，症状是「目标框的血条不动」。
+	SelfBinding.BindAttributes(ASC, UHeroCombatAttributeSet::GetVitalsAttributes(), this, &UHeroHUDController::OnSelfVitalsAttributeChanged);
+
+	// ①b 属性：属性面板上配了哪些就订阅哪些。
+	//
+	// 【订阅列表来自配置，不是硬编码的 27 条】—— 这是「面板完全数据驱动」的最后一块：
+	// 加一行面板 = 在 DA 里加一条，订阅自动跟上，不用回来改这里。
+	//
+	// 代价：血/能量的 4 条会被订阅两次（vitals 一次、面板一次）。
+	// 这是【刻意接受】的 —— FHUDAttributeBinding 的记账本来就支持叠加（每个句柄独立摘），
+	// 而为了省这 4 个委托去写「跳过已经绑过的属性」的判断，会把「订阅集合」变成两处推导，
+	// 那正是这份配置想避免的东西。
+	if (AttributePanelConfig)
+	{
+		TArray<FGameplayAttribute> PanelAttributes;
+		PanelAttributes.Reserve(AttributePanelConfig->Entries.Num());
+		for (const FHeroAttributePanelEntry& Entry : AttributePanelConfig->Entries)
+		{
+			// 只收有效的：空条目（配了行但没选属性）留着的话会绑到 GetAllAttribute 之外的空属性上，
+			// 那种委托永远不会触发，纯属白白多一条需要维护的句柄。
+			if (Entry.Attribute.IsValid())
+			{
+				PanelAttributes.Add(Entry.Attribute);
+			}
+		}
+
+		if (PanelAttributes.Num() > 0)
+		{
+			SelfBinding.BindAttributes(ASC, PanelAttributes, this, &UHeroHUDController::OnSelfAttributesAttributeChanged);
+		}
+	}
 
 	// ② 标签：每个槽的冷却标签各一条。
 	//    NewOrRemoved = 只在 0→1 / 1→0 触发，中间的 1→2、2→1 不触发 —— 这恰好就是「开关」语义。
 	//    不要用 AnyCountChange：同一帧里被两层 GE 挂上时会多抖一次。
+	//    没有冷却标签的槽（被动）由 BindTag 自己跳过，这里不用先判一次。
 	if (SlotConfig)
 	{
 		for (const FHeroHUDSlotEntry& Entry : SlotConfig->Slots)
 		{
-			if (!Entry.CooldownTag.IsValid())
-			{
-				continue;
-			}
-			const FDelegateHandle Handle = ASC
-				->RegisterGameplayTagEvent(Entry.CooldownTag, EGameplayTagEventType::NewOrRemoved)
-				.AddUObject(this, &UHeroHUDController::OnCooldownTagChanged);
-			BoundTagEvents.Add({ Entry.CooldownTag, Handle });
+			SelfBinding.BindTag(ASC, Entry.CooldownTag, this, &UHeroHUDController::OnCooldownTagChanged);
 		}
 	}
 
@@ -152,88 +180,33 @@ void UHeroHUDController::BindSelf()
 	};
 	for (const FGameplayTag& Tag : StatusTags)
 	{
-		const FDelegateHandle Handle = ASC
-			->RegisterGameplayTagEvent(Tag, EGameplayTagEventType::NewOrRemoved)
-			.AddUObject(this, &UHeroHUDController::OnStatusTagChanged);
-		BoundTagEvents.Add({ Tag, Handle });
+		SelfBinding.BindTag(ASC, Tag, this, &UHeroHUDController::OnStatusTagChanged);
 	}
 }
 
 void UHeroHUDController::UnbindSelf()
 {
-	if (UMyAbilitySystemComponent* ASC = BoundASC.Get())
-	{
-		for (const FHUDBoundTagEvent& Entry : BoundTagEvents)
-		{
-			if (Entry.Handle.IsValid())
-			{
-				ASC->UnregisterGameplayTagEvent(Entry.Handle, Entry.Tag, EGameplayTagEventType::NewOrRemoved);
-			}
-		}
-
-		if (HealthHandle.IsValid())
-		{
-			ASC->GetGameplayAttributeValueChangeDelegate(UHeroCombatAttributeSet::GetHealthAttribute()).Remove(HealthHandle);
-		}
-		if (MaxHealthHandle.IsValid())
-		{
-			ASC->GetGameplayAttributeValueChangeDelegate(UHeroCombatAttributeSet::GetMaxHealthAttribute()).Remove(MaxHealthHandle);
-		}
-		if (EnergyHandle.IsValid())
-		{
-			ASC->GetGameplayAttributeValueChangeDelegate(UHeroCombatAttributeSet::GetEnergyAttribute()).Remove(EnergyHandle);
-		}
-		if (MaxEnergyHandle.IsValid())
-		{
-			ASC->GetGameplayAttributeValueChangeDelegate(UHeroCombatAttributeSet::GetMaxEnergyAttribute()).Remove(MaxEnergyHandle);
-		}
-	}
-	// ASC 已经被销毁的情况什么都不用做：委托跟着它一起没了。这里唯一的要求是
-	// 【不要把句柄留着复用】—— 所以下面无条件 Reset。
-
-	BoundTagEvents.Reset();
-	HealthHandle.Reset();
-	MaxHealthHandle.Reset();
-	EnergyHandle.Reset();
-	MaxEnergyHandle.Reset();
+	// 摘句柄的记账全在 FHUDAttributeBinding 里（三处绑定共用一份，就不存在「漏摘一个」）。
+	// ASC 已经被销毁的情况它自己会跳过：委托跟着 ASC 一起没了，唯一的要求是把句柄清掉。
+	SelfBinding.Unbind();
 }
 
 void UHeroHUDController::UnbindObserved()
 {
-	if (UAbilitySystemComponent* ASC = ObservedASC.Get())
-	{
-		for (const FHUDBoundTagEvent& Entry : ObservedTagEvents)
-		{
-			if (Entry.Handle.IsValid())
-			{
-				ASC->UnregisterGameplayTagEvent(Entry.Handle, Entry.Tag, EGameplayTagEventType::NewOrRemoved);
-			}
-		}
+	ObservedBinding.Unbind();
 
-		if (ObservedHealthHandle.IsValid())
-		{
-			ASC->GetGameplayAttributeValueChangeDelegate(UHeroCombatAttributeSet::GetHealthAttribute()).Remove(ObservedHealthHandle);
-		}
-		if (ObservedMaxHealthHandle.IsValid())
-		{
-			ASC->GetGameplayAttributeValueChangeDelegate(UHeroCombatAttributeSet::GetMaxHealthAttribute()).Remove(ObservedMaxHealthHandle);
-		}
-		if (ObservedEnergyHandle.IsValid())
-		{
-			ASC->GetGameplayAttributeValueChangeDelegate(UHeroCombatAttributeSet::GetEnergyAttribute()).Remove(ObservedEnergyHandle);
-		}
-		if (ObservedMaxEnergyHandle.IsValid())
-		{
-			ASC->GetGameplayAttributeValueChangeDelegate(UHeroCombatAttributeSet::GetMaxEnergyAttribute()).Remove(ObservedMaxEnergyHandle);
-		}
+	// 目标身上那条 OnDestroyed 要单独摘：它挂在 Actor 上，不归 ASC 那份记账管。
+	// 读的是【当前】的 ObservedTarget —— 所以本函数必须在 ObservedTarget 被改写之前调
+	//（SetObservedTarget 正是这个顺序：先 UnbindObserved，再赋新目标）。
+	if (AActor* Previous = ObservedTarget.Get())
+	{
+		Previous->OnDestroyed.RemoveDynamic(this, &UHeroHUDController::OnObservedTargetDestroyed);
 	}
 
-	ObservedTagEvents.Reset();
-	ObservedHealthHandle.Reset();
-	ObservedMaxHealthHandle.Reset();
-	ObservedEnergyHandle.Reset();
-	ObservedMaxEnergyHandle.Reset();
-
+	// 解绑和「忘了这个目标」写在同一个函数里，是为了让三条路径
+	//（切到别的目标 / 切回 nullptr / 被 SetObservedTarget 归一化成 nullptr）
+	// 不可能只做一半 —— 只解绑不清引用，症状是「血条乱跳」；只清引用不解绑，症状是「收到已销毁目标的事件」。
+	// 目标框本身的收起由 SetObservedTarget 末尾那次强制刷新负责。
 	ObservedTarget = nullptr;
 	ObservedASC = nullptr;
 }
@@ -259,6 +232,7 @@ void UHeroHUDController::ShutdownHUD()
 	CachedVitals = FHUDVitalsView();
 	CachedSlots.Reset();
 	CachedTarget = FTargetFrameView();
+	CachedAttributes = FHeroAttributePanelView();
 }
 
 void UHeroHUDController::StartBindRetry()
@@ -306,6 +280,7 @@ FHUDSnapshot UHeroHUDController::PullHUDState() const
 	Snapshot.Vitals = CachedVitals;
 	Snapshot.Slots = CachedSlots;
 	Snapshot.Target = CachedTarget;
+	Snapshot.Attributes = CachedAttributes;
 	return Snapshot;
 }
 
@@ -321,6 +296,7 @@ void UHeroHUDController::BroadcastInitialValues()
 	// 这也是「订阅即拉取」的兜底路径 —— Widget 在 NativeConstruct 里已经拉过一次，
 	// 这里的重放是给「已经建好、正等状态回来」的 Widget 用的。
 	RebuildVitals(true);
+	RebuildAttributes(true);
 	RebuildAllSlots(true);
 	RefreshTargetFrame(true);
 	OnHUDReady.Broadcast(true);
@@ -356,6 +332,10 @@ void UHeroHUDController::ResetToUnboundState()
 
 	// 目标通道和 Self 通道互相独立：Self 没绑上不代表目标框也要收掉。
 	RefreshTargetFrame(true);
+
+	// 属性面板：RebuildAttributes 自己在「拿不到 ASC」时会把 bValid 置 false 并广播，
+	// 面板据此整块收起 —— 静态表现（图标 / 名字）照样留着，只是不显示 0。
+	RebuildAttributes(true);
 
 	// 显式广播一遍，不走「变了才推」—— 这里的场景恰恰是「值没变，但 UI 必须回到未就绪」。
 	OnVitalsChanged.Broadcast(CachedVitals);
@@ -401,9 +381,63 @@ void UHeroHUDController::SetSlotConfig(UHeroHUDSlotConfig* InConfig)
 	}
 }
 
+void UHeroHUDController::RefreshSlotViewsFromConfig()
+{
+	EnsureSlotCacheSize();
+
+	for (int32 Index = 0; Index < CachedSlots.Num(); ++Index)
+	{
+		// 【在旧值的基础上改，而不是重新构造一个】—— 冷却秒数、可用性状态、能力归属都是
+		// 运行期算出来的，配置刷新不该把它们冲掉（那会表现成"改个尺寸，冷却条全清空了"）。
+		FSkillSlotView New = CachedSlots[Index];
+		New.SlotIndex = Index;
+
+		const FHeroHUDSlotEntry* Entry = SlotConfig ? SlotConfig->FindEntry(Index) : nullptr;
+		ApplyEntryStatic(New, Entry);
+
+		// 隐藏与否 = 配置（bHideWhenUnavailable）× 运行期（这一刻有没有能力），
+		// 所以要拿【保留下来的】bHasAbility 重算一遍，不能只刷配置那一半。
+		New.bHidden = IsReservedSlotHidden(Entry, New.bHasAbility);
+
+		CachedSlots[Index] = New;
+	}
+
+	// 强制重播：这里变的可能只是"配置那一侧"（视图的字段值恰好没变），
+	// 走「变了才推」会被挡掉，UI 就永远看不到新尺寸。
+	RebuildAllSlots(/*bForceBroadcast=*/true);
+}
+
 int32 UHeroHUDController::GetNumSlots() const
 {
 	return SlotConfig ? SlotConfig->NumSlots() : 0;
+}
+
+void UHeroHUDController::SetAttributePanelConfig(UHeroAttributePanelConfig* InConfig)
+{
+	if (InConfig && InConfig->Entries.Num() == 0)
+	{
+		// 空配置【不静默】：面板会是空的，而没有任何提示的话，看到的现象是
+		// 「HUD 上就是没有属性条」—— 排查时第一个会怀疑的是 Widget 没绑上。
+		UE_LOG(LogTemp, Warning,
+			TEXT("UHeroHUDController: UHeroAttributePanelConfig(%s) 的 Entries 是空的，属性面板不会有任何行。"),
+			*GetNameSafe(InConfig));
+	}
+
+	if (AttributePanelConfig == InConfig)
+	{
+		return;
+	}
+
+	// 换配置 = 订阅的属性集合变了（见 BindSelf ①b），旧的句柄依据已经没了，必须整体重来。
+	// 和 SetSlotConfig 同一个形状：先解绑、再赋值、再重绑 + 重放一份全量。
+	UnbindSelf();
+	AttributePanelConfig = InConfig;
+
+	if (BoundASC.IsValid())
+	{
+		BindSelf();
+		BroadcastInitialValues();
+	}
 }
 
 void UHeroHUDController::EnsureSlotCacheSize()
@@ -446,6 +480,7 @@ void UHeroHUDController::ApplyEntryStatic(FSkillSlotView& View, const FHeroHUDSl
 	View.KeyLabel = Entry->KeyLabel;
 	View.DisplayName = Entry->DisplayName;
 	View.Kind = Entry->Kind;
+	View.SlotSizeScale = Entry->SlotSizeScale;
 }
 
 bool UHeroHUDController::IsReservedSlotHidden(const FHeroHUDSlotEntry* Entry, bool bHasAbility)
@@ -461,27 +496,29 @@ bool UHeroHUDController::IsReservedSlotHidden(const FHeroHUDSlotEntry* Entry, bo
 // 事件回调
 // ===========================================================================
 
-void UHeroHUDController::OnHealthAttributeChanged(const FOnAttributeChangeData& Data)
+void UHeroHUDController::OnSelfVitalsAttributeChanged(const FOnAttributeChangeData& Data)
 {
 	RebuildVitals(false);
-}
 
-void UHeroHUDController::OnMaxHealthAttributeChanged(const FOnAttributeChangeData& Data)
-{
-	RebuildVitals(false);
-}
-
-void UHeroHUDController::OnEnergyAttributeChanged(const FOnAttributeChangeData& Data)
-{
 	// 能量同时喂两条通道：能量条本身 + 「蓝不够」的灰化。
-	RebuildVitals(false);
-	RebuildAllSlots(false);
+	//
+	// 按属性分流而不是四条都重算槽位：槽位重算要查冷却（FindAbilitySpecFromHandle +
+	// GetCooldownTimeRemainingAndDuration），而血量变化跟技能可用性一点关系都没有 ——
+	// 挨打时把六个槽白算一遍没有意义。
+	const bool bEnergy = Data.Attribute == UHeroCombatAttributeSet::GetEnergyAttribute()
+		|| Data.Attribute == UHeroCombatAttributeSet::GetMaxEnergyAttribute();
+	if (bEnergy)
+	{
+		RebuildAllSlots(false);
+	}
 }
 
-void UHeroHUDController::OnMaxEnergyAttributeChanged(const FOnAttributeChangeData& Data)
+void UHeroHUDController::OnSelfAttributesAttributeChanged(const FOnAttributeChangeData& Data)
 {
-	RebuildVitals(false);
-	RebuildAllSlots(false);
+	// 不分流：整块重算（理由见头文件）。这是和 vitals 那条【唯一的】区别 ——
+	// vitals 会为了「别在挨打时白算六个槽」而按属性分流，面板这边没有那种代价，
+	// 而且属性之间会互相影响，分流反而要维护一张「谁影响谁」的表。
+	RebuildAttributes(false);
 }
 
 void UHeroHUDController::OnCooldownTagChanged(const FGameplayTag ChangedTag, int32 /*NewCount*/)
@@ -519,22 +556,7 @@ void UHeroHUDController::OnStatusTagChanged(const FGameplayTag ChangedTag, int32
 	RebuildAllSlots(false);
 }
 
-void UHeroHUDController::OnObservedHealthChanged(const FOnAttributeChangeData& Data)
-{
-	RefreshTargetFrame(false);
-}
-
-void UHeroHUDController::OnObservedMaxHealthChanged(const FOnAttributeChangeData& Data)
-{
-	RefreshTargetFrame(false);
-}
-
-void UHeroHUDController::OnObservedEnergyChanged(const FOnAttributeChangeData& Data)
-{
-	RefreshTargetFrame(false);
-}
-
-void UHeroHUDController::OnObservedMaxEnergyChanged(const FOnAttributeChangeData& Data)
+void UHeroHUDController::OnObservedVitalsAttributeChanged(const FOnAttributeChangeData& Data)
 {
 	RefreshTargetFrame(false);
 }
@@ -542,6 +564,17 @@ void UHeroHUDController::OnObservedMaxEnergyChanged(const FOnAttributeChangeData
 void UHeroHUDController::OnObservedStatusTagChanged(const FGameplayTag ChangedTag, int32 NewCount)
 {
 	RefreshTargetFrame(false);
+}
+
+void UHeroHUDController::OnObservedTargetDestroyed(AActor* DestroyedActor)
+{
+	// 走 SetObservedTarget(nullptr) 而不是直接 RefreshTargetFrame：
+	// 「被销毁」和「切回没有目标」必须是同一条路径 —— 目标框收起、句柄摘干净、
+	// 缓存里 bHasTarget 归 false，三件事一起做，才有唯一的落点。
+	//
+	// 注意这里【不能】假设 ObservedTarget 还是非空：Actor 销毁时弱引用可能已经失效，
+	// 那种情况下 SetObservedTarget 会走到「前后都是空」那条分支，照样强制刷新一次。
+	SetObservedTarget(nullptr);
 }
 
 // ===========================================================================
@@ -567,6 +600,75 @@ void UHeroHUDController::RebuildVitals(bool bForceBroadcast)
 	{
 		CachedVitals = New;
 		OnVitalsChanged.Broadcast(CachedVitals);
+	}
+}
+
+FText UHeroHUDController::FormatAttributeValue(float Value, EHeroAttributeFormat Format)
+{
+	// 无千分位：属性面板上一格只有几十像素宽，"1,234" 会挤爆，而且 LoL 也不这么显示。
+	const FNumberFormattingOptions NoGrouping = FNumberFormattingOptions::DefaultNoGrouping();
+
+	switch (Format)
+	{
+	case EHeroAttributeFormat::OneDecimal:
+	{
+		// 最少 / 最多都锁一位：0.8 显示成 "0.8" 而不是 "0.8"、"1" 两种形态混着。
+		FNumberFormattingOptions Options = NoGrouping;
+		Options.SetMinimumFractionalDigits(1);
+		Options.SetMaximumFractionalDigits(1);
+		return FText::AsNumber(Value, &Options);
+	}
+
+	case EHeroAttributeFormat::Percent:
+	{
+		// 属性存的是比率（0.25 = 25%），显示口径在这里 ×100 —— 转换只有这一处。
+		// 用 FText::Format 而不是拼字符串：% 号是可本地化的，别写死进 Printf。
+		return FText::Format(
+			NSLOCTEXT("HeroHUD", "AttributePercentFormat", "{0}%"),
+			FText::AsNumber(FMath::RoundToInt(Value * 100.f), &NoGrouping));
+	}
+
+	case EHeroAttributeFormat::Integer:
+	default:
+		return FText::AsNumber(FMath::RoundToInt(Value), &NoGrouping);
+	}
+}
+
+void UHeroHUDController::RebuildAttributes(bool bForceBroadcast)
+{
+	FHeroAttributePanelView New;
+	const UMyAbilitySystemComponent* ASC = BoundASC.Get();
+	New.bValid = (ASC != nullptr);
+
+	// 【长度和配置一一对应】，即使拿不到 ASC 也要建出这些行：
+	// Widget 按下标认行（同技能槽），少一行会让后面所有行错位，而「收起」是靠 bValid 表达的，
+	// 不是靠「数组是空的」。
+	if (AttributePanelConfig)
+	{
+		New.Entries.Reserve(AttributePanelConfig->Entries.Num());
+
+		for (const FHeroAttributePanelEntry& Source : AttributePanelConfig->Entries)
+		{
+			FHeroAttributeEntryView& Entry = New.Entries.AddDefaulted_GetRef();
+
+			// 静态表现每次都带上：Widget 因此完全不需要认识 UHeroAttributePanelConfig
+			//（那份资产持有 FGameplayAttribute，会把它拖进 GAS 依赖）。
+			Entry.Icon = Source.Icon;
+			Entry.DisplayName = Source.DisplayName;
+			Entry.bShowInCompact = Source.bShowInCompact;
+
+			// 未就绪时数值留 0（但 UI 因为 bValid=false 整块收起了，看不见）。
+			const float Value = (ASC && Source.Attribute.IsValid())
+				? ASC->GetNumericAttribute(Source.Attribute)
+				: 0.f;
+			Entry.ValueText = FormatAttributeValue(Value, Source.Format);
+		}
+	}
+
+	if (bForceBroadcast || !New.EqualsForUI(CachedAttributes))
+	{
+		CachedAttributes = New;
+		OnAttributesChanged.Broadcast(CachedAttributes);
 	}
 }
 
@@ -936,22 +1038,24 @@ void UHeroHUDController::SetObservedTarget(AActor* NewTarget)
 	ObservedTarget = NewTarget;
 	ObservedASC = NewASC;
 
+	// 目标被销毁时没有任何属性/标签事件会打进来（ASC 跟着一起没了），
+	// 所以要额外听一条 Actor 自己的销毁通知，否则目标框会冻在最后一帧。
+	// sparse 动态委托：只能 AddDynamic，且必须先判空。
+	if (NewTarget)
+	{
+		NewTarget->OnDestroyed.AddDynamic(this, &UHeroHUDController::OnObservedTargetDestroyed);
+	}
+
 	if (NewASC)
 	{
-		ObservedHealthHandle = NewASC->GetGameplayAttributeValueChangeDelegate(UHeroCombatAttributeSet::GetHealthAttribute())
-			.AddUObject(this, &UHeroHUDController::OnObservedHealthChanged);
-		ObservedMaxHealthHandle = NewASC->GetGameplayAttributeValueChangeDelegate(UHeroCombatAttributeSet::GetMaxHealthAttribute())
-			.AddUObject(this, &UHeroHUDController::OnObservedMaxHealthChanged);
-		ObservedEnergyHandle = NewASC->GetGameplayAttributeValueChangeDelegate(UHeroCombatAttributeSet::GetEnergyAttribute())
-			.AddUObject(this, &UHeroHUDController::OnObservedEnergyChanged);
-		ObservedMaxEnergyHandle = NewASC->GetGameplayAttributeValueChangeDelegate(UHeroCombatAttributeSet::GetMaxEnergyAttribute())
-			.AddUObject(this, &UHeroHUDController::OnObservedMaxEnergyChanged);
+		// 和 Self 通道用的是【同一份】列表（GetVitalsAttributes 是唯一定义），
+		// 和 Self 那四条绑的是两个不同的回调、两套句柄 —— 叠加订阅是合法的，见 §3.3。
+		ObservedBinding.BindAttributes(
+			NewASC, UHeroCombatAttributeSet::GetVitalsAttributes(), this, &UHeroHUDController::OnObservedVitalsAttributeChanged);
 
 		// 目标死了要压暗目标框 —— 这是目标通道唯一的标签事件。
-		const FDelegateHandle Handle = NewASC
-			->RegisterGameplayTagEvent(LOLGameplayTags::State_Dead, EGameplayTagEventType::NewOrRemoved)
-			.AddUObject(this, &UHeroHUDController::OnObservedStatusTagChanged);
-		ObservedTagEvents.Add({ LOLGameplayTags::State_Dead, Handle });
+		ObservedBinding.BindTag(
+			NewASC, LOLGameplayTags::State_Dead, this, &UHeroHUDController::OnObservedStatusTagChanged);
 	}
 
 	// 目标换了：强制推一次，哪怕数值碰巧一样（bHasTarget 变了也必须让 UI 知道）。

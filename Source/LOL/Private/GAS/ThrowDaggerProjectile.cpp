@@ -81,9 +81,31 @@ void AThrowDaggerProjectile::OnOverlap(UPrimitiveComponent*, AActor* OtherActor,
 	UPrimitiveComponent*, int32, bool bFromSweep, const FHitResult& SweepResult)
 {
 	if (!OtherActor || OtherActor == GetInstigator() || OtherActor == GetOwner()) return;
-	if (!HasAuthority()) return;   
+	if (!HasAuthority()) return;
 
-	
+	// ⚠️⚠️ 【同伴匕首：直接忽略，绝不能 Destroy】—— 散射（海克斯「三连飞刃」）时多把匕首
+	//   在【同一帧】生成，球体（半径 12）必然互相重叠 ⇒ 必定触发 OnComponentBeginOverlap。
+	//
+	//   ★ 这里是 2026-10-03 修掉的真凶：上一版写的不是「忽略」而是「销毁自己」，
+	//     于是三把的顺序必然是 —— #1 生成（活着）；#2 生成，和 #1 重叠，两边各自
+	//     收到对方的事件 → 各自 Destroy()（连坐两把）；#3 生成时 #1/#2 已进销毁队列，
+	//     重叠检测不到 → 只有 #3 活下来。这就是「只会丢一个，而且是第三个」。
+	//     「毁掉同伴」和「无视同伴」只差一行，症状完全相反。
+	//
+	//   ★ 也不能只靠「出生点前推 MultiSpawnSpacing」来拉开间距：三把是沿**各自**方向
+	//     前推的，相邻两把的实际间距 = 2·L·sin(半角)。SpreadAngle=30° ⇒ 半角 7.5°，
+	//     L=30 ⇒ 间距只有 7.8cm，远小于球体直径 24cm —— 照样重叠。要真靠距离分开
+	//     得 L>92cm，那匕首会在手前面一米处凭空出现。所以正解是【逻辑上忽略】，
+	//     前推量只用来让视觉上的扇形更好看。
+	//
+	//   为什么不能改 CollisionResponseToChannel：那要逐通道配，且会把「打得到地形」
+	//     一起改掉；这里只要「同伴互不干扰」这一个粒度。
+	if (Cast<AThrowDaggerProjectile>(OtherActor))
+	{
+		return;   // ← 只返回，什么都不做。别在这里 Destroy()。
+	}
+
+
 	// 伤害统一走 GE_Damage + UExecCalc_Damage（见 GAS_Block_Setup.md §3.6）。
 	// 这里只喂参数、不算伤害，格挡/抗性/减伤全在 ExecCalc 里，和近战是同一条路。
 	if (DamageGE)

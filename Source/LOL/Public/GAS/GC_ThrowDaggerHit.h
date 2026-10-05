@@ -39,10 +39,4 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Hit")
 	TObjectPtr<UParticleSystem> DefaultFX;
 
-	/**
-	 * 命中点的一次性音效（可空）。用软引用：默认值只是路径，想要别的在编辑器里覆盖即可。
-	 * 不分命中类型 —— Paragon 包里只有 Kallari 的语音，没有武器/命中音效可分。
-	 */
-	UPROPERTY(EditDefaultsOnly, Category = "Hit")
-	TSoftObjectPtr<USoundBase> HitSound;
 };

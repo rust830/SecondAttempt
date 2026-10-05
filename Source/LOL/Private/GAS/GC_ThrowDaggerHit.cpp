@@ -1,6 +1,7 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "GAS/GC_ThrowDaggerHit.h"
+#include "Audio/HeroAudioLibrary.h"
 #include "GAS/LOLGameplayTags.h"
 #include "GameplayEffectTypes.h"
 #include "Kismet/GameplayStatics.h"
@@ -13,10 +14,9 @@ UGC_ThrowDaggerHit::UGC_ThrowDaggerHit()
 	// CDO 构造阶段字符串查标签拿不到（返回 None），必须直接用原生标签对象。
 	GameplayCueTag = LOLGameplayTags::GameplayCue_ThrowDagger_Hit;
 
-	// 默认指向 Paragon 的 E 技能命中语音。软引用：默认值只是路径，编辑器里随时换
-	// （和 UAnimNotifyState_BladeTrail::TrailSystem / UGC_EmpoweredHit::HitSystem 同一种写法）。
-	HitSound = TSoftObjectPtr<USoundBase>(
-		FSoftObjectPath(TEXT("/Game/ParagonKallari/Audio/Cues/Kallari_Ability_E_Engage.Kallari_Ability_E_Engage")));
+	// 音效：这一类身上不再留 HitSound，一律走 UHeroAudioConfig 的事件表（Audio.ThrowDaggerHit）。
+	// 原来这里硬编码 Kallari_Ability_E_Engage（那是「按 E 起手」的语音，不是命中音），
+	// 属于 CodeReview/12_音效层.md 里点的语义错配，删掉改走表。
 }
 
 bool UGC_ThrowDaggerHit::OnExecute_Implementation(AActor* MyTarget, const FGameplayCueParameters& Parameters) const
@@ -41,9 +41,6 @@ bool UGC_ThrowDaggerHit::OnExecute_Implementation(AActor* MyTarget, const FGamep
 		}
 	}
 
-	// 音效先取：粒子没配但音效配了，这一击也不算「没有表现」。
-	USoundBase* Sound = HitSound.LoadSynchronous();
-
 	// Location / Normal 由投射物从 FHitResult 填好：命中点 + 命中面法线。
 	// 用 Normal 决定朝向，粒子才会贴着墙面/地面朝外喷，而不是永远世界朝前。
 	const FRotator Rotation = Parameters.Normal.IsNearlyZero()
@@ -54,11 +51,10 @@ bool UGC_ThrowDaggerHit::OnExecute_Implementation(AActor* MyTarget, const FGamep
 	{
 		UGameplayStatics::SpawnEmitterAtLocation(World, FX, FTransform(Rotation, Parameters.Location));
 	}
-	if (Sound)
-	{
-		UGameplayStatics::PlaySoundAtLocation(World, Sound, Parameters.Location);
-	}
+	// 音效从事件表里取（Audio.ThrowDaggerHit）。
+	UHeroAudioLibrary::PlayAt(World, LOLGameplayTags::Audio_ThrowDaggerHit, Parameters.Location);
 
 	// 两个都留空 = 这次命中没有任何表现，和加音效之前一样返回 false（不是错误，只是没东西可播）。
-	return FX != nullptr || Sound != nullptr;
+	// 音效不计入。
+	return FX != nullptr;
 }

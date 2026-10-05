@@ -16,15 +16,32 @@ class LOL_API UMyAbilitySystemComponent : public UAbilitySystemComponent
 {
 	GENERATED_BODY()
 public:
-	UPROPERTY(EditAnywhere,BlueprintReadWrite)
-	float MyLeastInterval = 0.1f;
-
+	/**
+	 * 槽位按键的入口。全项目所有走「按键 → 槽位标签」的能力都在这里汇合
+	 * （QWER / DF / 格挡 / 地面闪避 / 拳击连段 / 空中攻击 / 海克斯 1-3 / 形态切换）。
+	 *
+	 * 三段语义：
+	 *  ① 槽位没授权 → 警告返回（配置错，值得吵）。
+	 *  ② 槽位上的能力正在激活（典型：投掷技能处于瞄准态）→ 广播 Event.Input.Repressed，
+	 *     由能力自己决定「再按」是取消还是别的语义，本类不替它决定。
+	 *  ③ 否则破隐 + TryActivateAbility。
+	 */
 	void AbilityInputTagPressed(const FGameplayTag& SlotTag);
-	void AbilityInputTagHeld(const FGameplayTag& SlotTag);
-	void AbilityInputTagReleased(const FGameplayTag& SlotTag);
 
 	FGameplayAbilitySpecHandle GetHandleForSlot(const FGameplayTag& SlotTag)const;
+
+	/**
+	 * 槽位上的能力等级。**槽位没授权时返回 -1**（不是 0）。
+	 *
+	 * ⚠️ 调用方必须判 < 0 —— 0 是「合法的 0 级」，-1 才是「没这个槽位」。
+	 * 引擎惯例（GetAbilityLevelFromSpecHandle 等）用的是 INDEX_NONE，
+	 * 这里保留 -1 是历史包袱，改它要一起改所有调用方。
+	 *
+	 * 目前 C++ 与蓝图都还没有调用方（预留 API）；语义写在这里是为了将来有人用时不踩坑。
+	 */
 	int32 GetAbilityLevelForSlot(const FGameplayTag& SlotTag)const;
+
+	/** 改槽位上能力的等级。槽位没授权时静默无操作。 */
 	void SetAbilityLevelForSlot(const FGameplayTag& SlotTag,int32 NewLevel);
 
 	/**

@@ -6,6 +6,8 @@
 #include "AbilitySystemComponent.h"
 #include "HeroCombatAttributeSet.generated.h"
 
+class UHeroStatConfig;
+
 #define HERO_ATTRIBUTE_ACCESSORS(ClassName, PropertyName) \
 	GAMEPLAYATTRIBUTE_PROPERTY_GETTER(ClassName, PropertyName) \
 	GAMEPLAYATTRIBUTE_VALUE_GETTER(PropertyName) \
@@ -27,8 +29,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FHeroOutOfHealthSignature, AActor*,
  * 英雄主属性集：数值口径见 Desktop/属性集.txt。
  *
  * 三条纪律：
- *  1. **基础值只有一个来源** —— .cpp 顶部的 GHeroStatTable（1 级值 + 每级成长）。
- *     构造函数和 ApplyChampionLevel 都读它，不要在任何地方再写一遍数字。
+ *  1. **基础值只有一个来源** —— 优先 UHeroStatConfig（每英雄一份，见 HeroStatConfig.h），
+ *     没配英雄时退回 .cpp 顶部的 GHeroStatTable（= 默认英雄）。构造函数和 ApplyStats
+ *     都读这两个来源，不要在任何地方再写一遍数字。
  *  2. **钳制写在 PreAttributeBaseChange + PreAttributeChange 两处**：
  *     前者管「直接写基础值」（升级、ExecCalc 的 Instant 输出都走这条），
  *     后者管「聚合后的最终值」。只写一处会漏掉另一条路径（引擎注释里明说了要两处都钳）。
@@ -56,6 +59,26 @@ public:
 	FHeroOutOfHealthSignature OnOutOfHealth;
 
 	// ---------------------------------------------------------------------
+	// 属性集合（「一组属性」的定义，不是某一条属性）
+	// ---------------------------------------------------------------------
+
+	/**
+	 * 血条 / 能量条读哪几条 —— **唯一定义**。
+	 *
+	 * Self（本地玩家自己）和 Observed（目标框）两条通道原先是各写一份一模一样的 4 条。
+	 * 以后加一条资源（护盾、怒气）时改了一处漏一处，症状是「自己挨打血条动、目标框的不动」，
+	 * 而且只在有目标的时候才暴露。两处都调它，这类漏改就不存在了。
+	 *
+	 * 【头顶血条不走这里，那是有意的】：它只要血、不要能量，见
+	 * UHeroOverlayHealthComponent::Bind 里那份两条的列表。别顺手改成调用这里 —— 那样
+	 * 每个小兵头顶都会多绑两条永远不看的属性。
+	 *
+	 * 返回 const 引用而不是值：调用方都是拿去绑委托，复制一份 TArray 没有意义。
+	 * 用函数内 static 局部量（不是文件作用域）—— 避开「静态初始化期去问 UPROPERTY」的顺序问题。
+	 */
+	static const TArray<FGameplayAttribute>& GetVitalsAttributes();
+
+	// ---------------------------------------------------------------------
 	// 资源
 	// ---------------------------------------------------------------------
 
@@ -80,6 +103,14 @@ public:
 
 	UPROPERTY(BlueprintReadOnly, ReplicatedUsing=OnRep_AttackDamage, Category="Hero|Offense") FGameplayAttributeData AttackDamage;
 	HERO_ATTRIBUTE_ACCESSORS(UHeroCombatAttributeSet, AttackDamage)
+	/**
+	 * 法术强度。基础值 0、无成长（属性集.txt 里没有这一条，LoL 的法强也全靠装备/技能堆）。
+	 *
+	 * 【目前只是数据】：魔法伤害的公式还是「攻击力 × 倍率」，没有把法强接进去 ——
+	 * 接了法强的技能出现时，改的是 UExecCalc_Damage 里的 ① 那一行，不是这里。
+	 */
+	UPROPERTY(BlueprintReadOnly, ReplicatedUsing=OnRep_AbilityPower, Category="Hero|Offense") FGameplayAttributeData AbilityPower;
+	HERO_ATTRIBUTE_ACCESSORS(UHeroCombatAttributeSet, AbilityPower)
 	UPROPERTY(BlueprintReadOnly, ReplicatedUsing=OnRep_BaseAttackSpeed, Category="Hero|Offense") FGameplayAttributeData BaseAttackSpeed;
 	HERO_ATTRIBUTE_ACCESSORS(UHeroCombatAttributeSet, BaseAttackSpeed)
 	UPROPERTY(BlueprintReadOnly, ReplicatedUsing=OnRep_AttackSpeedRatio, Category="Hero|Offense") FGameplayAttributeData AttackSpeedRatio;
@@ -89,6 +120,23 @@ public:
 	/** 派生值，不进数值表：BaseAttackSpeed + AttackSpeedRatio × BonusAttackSpeedPercent。 */
 	UPROPERTY(BlueprintReadOnly, ReplicatedUsing=OnRep_FinalAttackSpeed, Category="Hero|Offense") FGameplayAttributeData FinalAttackSpeed;
 	HERO_ATTRIBUTE_ACCESSORS(UHeroCombatAttributeSet, FinalAttackSpeed)
+
+	/**
+	 * 暴击率，0~1（0.25 = 25%）。默认 0 = 永远不暴击。
+	 *
+	 * 【谁能暴击由施加方声明】：UExecCalc_Damage 只在 Spec 上带了 Data.CanCrit 时才 roll，
+	 * 普攻（GA_ThreeHitPassive::ApplyServerHit）会带，技能不带 —— 和 LoL 一致。
+	 */
+	UPROPERTY(BlueprintReadOnly, ReplicatedUsing=OnRep_CritChance, Category="Hero|Offense") FGameplayAttributeData CritChance;
+	HERO_ATTRIBUTE_ACCESSORS(UHeroCombatAttributeSet, CritChance)
+	/**
+	 * 暴击伤害【倍率】，默认 2.0 = 200%。暴击时 Damage × 它。
+	 *
+	 * 存倍率而不是存百分数（和 BonusAttackSpeedPercent 存 0.5 一个口径）：
+	 * 「+10% 暴击伤害」的 GE 因此就是一条 Additive +0.1，不用在两边各写一次 /100。
+	 */
+	UPROPERTY(BlueprintReadOnly, ReplicatedUsing=OnRep_CritDamage, Category="Hero|Offense") FGameplayAttributeData CritDamage;
+	HERO_ATTRIBUTE_ACCESSORS(UHeroCombatAttributeSet, CritDamage)
 
 	/** 固定穿透（先算百分比再算固定，见 属性集.txt）。穿透本身没接进伤害公式，先存数值。 */
 	UPROPERTY(BlueprintReadOnly, ReplicatedUsing=OnRep_FlatArmorPen, Category="Hero|Offense") FGameplayAttributeData FlatArmorPen;
@@ -100,10 +148,13 @@ public:
 	UPROPERTY(BlueprintReadOnly, ReplicatedUsing=OnRep_PercentMagicPen, Category="Hero|Offense") FGameplayAttributeData PercentMagicPen;
 	HERO_ATTRIBUTE_ACCESSORS(UHeroCombatAttributeSet, PercentMagicPen)
 
-	/** 全能吸血：所有伤害都回血。回血链路没做（见方案文档第 8 节），先存数值。 */
+	/**
+	 * 全能吸血：所有伤害都按比例回血（0.15 = 造成的伤害回 15%）。
+	 * 结算在 UExecCalc_Damage ⑤ —— 按【最终伤害】（减抗/暴击/格挡之后）算。
+	 */
 	UPROPERTY(BlueprintReadOnly, ReplicatedUsing=OnRep_Omnivamp, Category="Hero|Offense") FGameplayAttributeData Omnivamp;
 	HERO_ATTRIBUTE_ACCESSORS(UHeroCombatAttributeSet, Omnivamp)
-	/** 生命偷取：只有普攻和带特效标签的伤害回血。同上，先存数值。 */
+	/** 生命偷取：只有普攻（挂了 Data.BasicAttack 的伤害）回血，其余同全能吸血。 */
 	UPROPERTY(BlueprintReadOnly, ReplicatedUsing=OnRep_LifeSteal, Category="Hero|Offense") FGameplayAttributeData LifeSteal;
 	HERO_ATTRIBUTE_ACCESSORS(UHeroCombatAttributeSet, LifeSteal)
 	/** 治疗与护盾强度加成。 */
@@ -139,11 +190,28 @@ public:
 	HERO_ATTRIBUTE_ACCESSORS(UHeroCombatAttributeSet, AbilityHaste)
 
 	/**
-	 * 按英雄等级把「基础值」重算一遍（1 级 = 只吃基础值，和构造函数刚建出来的结果一致）。
+	 * 按【英雄数值表 + 等级】把基础值重算一遍。1 级 = 只吃 Base，和构造函数刚建出来的结果一致。
 	 *
-	 * 现在【没有任何地方调用它】—— 等级系统还没做。数值表在这里是活的，接入等级时
-	 * 只要在升级那一刻调一次即可，不用再抄一遍成长公式。
+	 * 两个性质，动它的时候必须保住：
+	 *  1. **幂等**：每次都是 `Base + PerLevel × (Level-1)` 从表重算，不是 `+=` 增量。
+	 *     升级、复活、重连、切关卡都会重放它 —— 写成增量就会一遍遍叠加。
+	 *  2. **只写基础值**：不动 GE 修正符。所以装备、减速这些不受影响（它们改的是聚合后的值）。
+	 *
 	 * 写成普通成员函数而不是 GE：升级是「重设基础值」，不是可被驱散/叠加的状态。
+	 *
+	 * @param Config  这个英雄的数值表。nullptr / 空表 → 退回 GHeroStatTable（默认英雄）。
+	 * @param Level   英雄等级，1 起。0 或负数按 1 处理。
+	 *
+	 * 谁来调：只有 AHeroCombatCharacter::ApplyChampionStats（服务端、授予技能组的同一处）。
+	 * 构造函数【不能】调 —— 属性集的构造函数读不到英雄配置（那一刻没有 Pawn、没有英雄身份）。
+	 */
+	UFUNCTION(BlueprintCallable, Category="Hero")
+	void ApplyStats(const UHeroStatConfig* Config, int32 Level);
+
+	/**
+	 * 没配英雄数值表时的手动入口：等价于 ApplyStats(nullptr, Level)，用内置兜底表。
+	 *
+	 * 留着它是因为 BP 里可能有节点在调（它是 BlueprintCallable）。新代码一律走 ApplyStats。
 	 */
 	UFUNCTION(BlueprintCallable, Category="Hero")
 	void ApplyChampionLevel(int32 Level);
@@ -155,10 +223,13 @@ public:
 	UFUNCTION() void OnRep_MaxEnergy(const FGameplayAttributeData& OldValue);
 	UFUNCTION() void OnRep_EnergyRegen(const FGameplayAttributeData& OldValue);
 	UFUNCTION() void OnRep_AttackDamage(const FGameplayAttributeData& OldValue);
+	UFUNCTION() void OnRep_AbilityPower(const FGameplayAttributeData& OldValue);
 	UFUNCTION() void OnRep_BaseAttackSpeed(const FGameplayAttributeData& OldValue);
 	UFUNCTION() void OnRep_AttackSpeedRatio(const FGameplayAttributeData& OldValue);
 	UFUNCTION() void OnRep_BonusAttackSpeedPercent(const FGameplayAttributeData& OldValue);
 	UFUNCTION() void OnRep_FinalAttackSpeed(const FGameplayAttributeData& OldValue);
+	UFUNCTION() void OnRep_CritChance(const FGameplayAttributeData& OldValue);
+	UFUNCTION() void OnRep_CritDamage(const FGameplayAttributeData& OldValue);
 	UFUNCTION() void OnRep_FlatArmorPen(const FGameplayAttributeData& OldValue);
 	UFUNCTION() void OnRep_PercentArmorPen(const FGameplayAttributeData& OldValue);
 	UFUNCTION() void OnRep_FlatMagicPen(const FGameplayAttributeData& OldValue);

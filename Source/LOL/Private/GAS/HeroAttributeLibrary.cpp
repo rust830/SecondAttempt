@@ -14,7 +14,7 @@ namespace
 	 * 从 Actor 找到英雄属性集子对象。找不到返回 nullptr。
 	 *
 	 * 用 GetSet<T>() 而不是逐个 GetNumericAttribute()：前者是按类型取 subobject（一次），
-	 * 后者每次都要拿 FGameplayAttribute 去查一遍映射表（24 次）。而且 GetSet 的语义正好是
+	 * 后者每次都要拿 FGameplayAttribute 去查一遍映射表（27 次）。而且 GetSet 的语义正好是
 	 * 「这个 ASC 上确实注册了这类属性集」—— 不做任何猜测，读不到就是读不到。
 	 */
 	const UHeroCombatAttributeSet* ResolveHeroAttributeSet(const AActor* Source)
@@ -56,10 +56,13 @@ FHeroAttributeView UHeroAttributeLibrary::GetHeroAttributes(const AActor* Source
 	View.EnergyRegen = Set->GetEnergyRegen();
 
 	View.AttackDamage = Set->GetAttackDamage();
+	View.AbilityPower = Set->GetAbilityPower();
 	View.BaseAttackSpeed = Set->GetBaseAttackSpeed();
 	View.AttackSpeedRatio = Set->GetAttackSpeedRatio();
 	View.BonusAttackSpeedPercent = Set->GetBonusAttackSpeedPercent();
 	View.FinalAttackSpeed = Set->GetFinalAttackSpeed();
+	View.CritChance = Set->GetCritChance();
+	View.CritDamage = Set->GetCritDamage();
 
 	View.FlatArmorPen = Set->GetFlatArmorPen();
 	View.PercentArmorPen = Set->GetPercentArmorPen();

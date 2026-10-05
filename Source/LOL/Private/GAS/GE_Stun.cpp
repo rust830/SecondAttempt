@@ -27,4 +27,10 @@ UGE_Stun::UGE_Stun(const FObjectInitializer& ObjectInitializer)
 		ObjectInitializer.CreateDefaultSubobject<UCancelAbilityTagsGameplayEffectComponent>(this, TEXT("CancelAbilityTags"));
 	GEComponents.Add(CancelAbilities);
 	CancelAbilities->SetAndApplyCanceledAbilityTagChanges(FInheritedTagContainer(), FInheritedTagContainer());
+
+	// 眩晕表现（眩晕 Montage）挂在 cue 上：GE 挂上 → OnActive 播眩晕蒙太奇，GE 到期/被打断 → OnRemove 收掉。
+	// 和 UGE_Stealth / UGE_EmpoweredAttack 同一个理由：什么时候挂上、什么时候被移除引擎最清楚，
+	// 挂这里 → cue 自动 OnActive/OnRemove，不管是谁、以什么方式结束了眩晕都不会漏还原。
+	// 用原生标签对象构造，CDO 阶段不做字符串查找。
+	GameplayCues.Add(FGameplayEffectCue(LOLGameplayTags::GameplayCue_Stun, 0.f, 0.f));
 }

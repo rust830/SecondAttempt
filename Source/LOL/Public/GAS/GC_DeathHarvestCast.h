@@ -55,8 +55,6 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category="Vanish") TObjectPtr<UParticleSystem> AppearParticle;
 
 	/** 消失/现身的音效（可空，全端都能听到）。 */
-	UPROPERTY(EditDefaultsOnly, Category="Vanish") TObjectPtr<USoundBase> VanishSound;
-	UPROPERTY(EditDefaultsOnly, Category="Vanish") TObjectPtr<USoundBase> AppearSound;
 
 	// --- 传送镜头（只给施法者本人看，淡入淡出）---
 	/** 本地相机修改器类。默认 UMyDeathHarvestCameraModifier，一般不用改。 */

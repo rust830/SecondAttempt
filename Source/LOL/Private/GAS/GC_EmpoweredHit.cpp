@@ -1,7 +1,10 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "GAS/GC_EmpoweredHit.h"
+#include "Audio/HeroAudioLibrary.h"
+#include "GAS/CueCameraShake.h"
 #include "GAS/LOLGameplayTags.h"
+#include "Camera/CameraShakeBase.h"
 #include "Engine/World.h"
 #include "GameplayEffectTypes.h"
 #include "Kismet/GameplayStatics.h"
@@ -105,10 +108,12 @@ bool UGC_EmpoweredHit::OnExecute_Implementation(AActor* MyTarget, const FGamepla
 			*GetNameSafe(this));
 	}
 
-	if (USoundBase* Sound = HitSound.LoadSynchronous())
-	{
-		UGameplayStatics::PlaySoundAtLocation(World, Sound, Location);
-	}
+	UHeroAudioLibrary::PlayAt(World, LOLGameplayTags::Audio_EmpoweredHit, Location);
+
+	// 镜头振动只给【打人的那一端】，判定规则见 CueCameraShake.h。
+	// Scale 传 1（恒等）：5.8 里它对 WaveOscillator/PerlinNoise 那套 pattern 是死的，
+	// 本项目的抖动资产都不读它 —— 强弱一律在资产上配。传着是为了哪天换资产不用改调用点。
+	HeroCueCameraShake::PlayLocalHitShake(MyTarget, HitCameraShake);
 
 	return true;
 }

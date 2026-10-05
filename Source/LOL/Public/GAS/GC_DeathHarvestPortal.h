@@ -46,8 +46,6 @@ public:
 	/** 关门的一次性粒子。由 OnRemove 以【独立发射器】生成，所以它比本 actor 活得久。 */
 	UPROPERTY(EditDefaultsOnly, Category="Portal") TObjectPtr<UParticleSystem> CloseParticle;
 
-	UPROPERTY(EditDefaultsOnly, Category="Portal") TObjectPtr<USoundBase> OpenSound;
-	UPROPERTY(EditDefaultsOnly, Category="Portal") TObjectPtr<USoundBase> CloseSound;
 
 	/** 门体的相对偏移（想把门压到地面上时用）。 */
 	UPROPERTY(EditDefaultsOnly, Category="Portal") FVector RelativeOffset = FVector::ZeroVector;

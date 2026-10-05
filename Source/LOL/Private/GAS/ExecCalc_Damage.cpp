@@ -4,6 +4,8 @@
 #include "GAS/HeroCombatAttributeSet.h"
 #include "GAS/LOLGameplayTags.h"
 #include "GAS/BlockComponent.h"
+#include "GAS/DodgeComponent.h"
+#include "GAS/GE_Heal.h"
 #include "AbilitySystemComponent.h"
 #include "GameplayEffect.h"
 
@@ -25,6 +27,10 @@ struct FDamageStatics
 	DECLARE_ATTRIBUTE_CAPTUREDEF(PercentMagicPen);
 	DECLARE_ATTRIBUTE_CAPTUREDEF(Health);
 	DECLARE_ATTRIBUTE_CAPTUREDEF(MaxHealth);
+	DECLARE_ATTRIBUTE_CAPTUREDEF(CritChance);
+	DECLARE_ATTRIBUTE_CAPTUREDEF(CritDamage);
+	DECLARE_ATTRIBUTE_CAPTUREDEF(Omnivamp);
+	DECLARE_ATTRIBUTE_CAPTUREDEF(LifeSteal);
 
 	FDamageStatics()
 	{
@@ -44,6 +50,14 @@ struct FDamageStatics
 		// 想改成"施法者残血加伤"，把这两行的 Target 改成 Source 就行，别的地方不用动。
 		DEFINE_ATTRIBUTE_CAPTUREDEF(UHeroCombatAttributeSet, Health, Target, false);
 		DEFINE_ATTRIBUTE_CAPTUREDEF(UHeroCombatAttributeSet, MaxHealth, Target, false);
+
+		// 暴击是【攻击者自己的】属性，和攻击力一样从 Source 抓。
+		DEFINE_ATTRIBUTE_CAPTUREDEF(UHeroCombatAttributeSet, CritChance, Source, false);
+		DEFINE_ATTRIBUTE_CAPTUREDEF(UHeroCombatAttributeSet, CritDamage, Source, false);
+
+		// 吸血是【攻击者的】面板：全能吸血所有伤害都吃，生命偷取只吃普攻（Data.BasicAttack）。
+		DEFINE_ATTRIBUTE_CAPTUREDEF(UHeroCombatAttributeSet, Omnivamp, Source, false);
+		DEFINE_ATTRIBUTE_CAPTUREDEF(UHeroCombatAttributeSet, LifeSteal, Source, false);
 	}
 };
 
@@ -64,6 +78,10 @@ UExecCalc_Damage::UExecCalc_Damage()
 	RelevantAttributesToCapture.Add(DamageStatics().PercentMagicPenDef);
 	RelevantAttributesToCapture.Add(DamageStatics().HealthDef);
 	RelevantAttributesToCapture.Add(DamageStatics().MaxHealthDef);
+	RelevantAttributesToCapture.Add(DamageStatics().CritChanceDef);
+	RelevantAttributesToCapture.Add(DamageStatics().CritDamageDef);
+	RelevantAttributesToCapture.Add(DamageStatics().OmnivampDef);
+	RelevantAttributesToCapture.Add(DamageStatics().LifeStealDef);
 }
 
 void UExecCalc_Damage::Execute_Implementation(const FGameplayEffectCustomExecutionParameters& ExecutionParams,
@@ -81,6 +99,14 @@ void UExecCalc_Damage::Execute_Implementation(const FGameplayEffectCustomExecuti
 	}
 
 	const FGameplayEffectSpec& Spec = ExecutionParams.GetOwningSpec();
+
+	// ⓪ 无敌门：挂着 State.Invulnerable 的目标不吃任何伤害。
+	// 备战阶段由 ArenaGameMode 挂 / 开战摘（伤害执行只在服务端跑，loose tag 不复制无所谓）。
+	// 放在伤害执行的唯一落点上 —— 一处挡住所有伤害来源，不用每个技能各自判相位。
+	if (TargetASC->HasMatchingGameplayTag(LOLGameplayTags::State_Invulnerable))
+	{
+		return;
+	}
 
 	FAggregatorEvaluateParameters EvalParams;
 	EvalParams.SourceTags = Spec.CapturedSourceTags.GetAggregatedTags();
@@ -120,6 +146,27 @@ void UExecCalc_Damage::Execute_Implementation(const FGameplayEffectCustomExecuti
 		}
 	}
 
+	// ①c 暴击。放在抗性减免【之前】：LoL 的暴击是乘在原始伤害上的，先暴击再减伤和先减伤再暴击，
+	//     在「减免是乘法」这一步上等价，但以后加减伤（固定值减免）就会分道扬镳 —— 按 LoL 的口径定死在这里。
+	//
+	// 【为什么 roll 在 ExecCalc 里是安全的】近战伤害只在服务端施加：
+	//     GA_ThreeHitPassive::ConfirmHit() → HasAuthority() → ApplyServerHit()，
+	//     客户端根本不跑这条 ExecCalc，不存在两端各 roll 一次、伤害对不上的问题。
+	// ⚠️ 这条前提一旦被打破（以后有「客户端预测的伤害」走同一个 ExecCalc），
+	//    roll 必须提前到施加点、把结果写进 Spec，而不是留在这里 —— 否则两端各自 roll 的结果不同，
+	//    客户端会看到一次假伤害再被服务端纠正。
+	const float CritChance = Capture(DamageStatics().CritChanceDef);
+	const float CritDamage = Capture(DamageStatics().CritDamageDef);
+	const bool bCanCrit = Spec.GetSetByCallerMagnitude(LOLGameplayTags::Data_CanCrit, /*WarnIfNotFound=*/false, 0.f) > 0.f;
+	bool bCrit = false;
+	if (bCanCrit && FMath::FRand() < FMath::Clamp(CritChance, 0.f, 1.f))
+	{
+		// 暴击伤害存的是【倍率】（2.0 = 200%），直接乘。钳一下下限：
+		// 配置写错成 0 的话伤害会直接归零，那种「打不疼」比不暴击更难查。
+		Damage *= FMath::Max(0.f, CritDamage);
+		bCrit = true;
+	}
+
 	// ② 抗性减免。伤害类型由施加方打在 Spec 的动态资产标签上（同一个 GE 服务所有伤害，靠标签分流），
 	//    没打任何类型标签 = 物理（近战/匕首的默认）。
 	const FGameplayTagContainer& AssetTags = Spec.GetDynamicAssetTags();
@@ -140,6 +187,12 @@ void UExecCalc_Damage::Execute_Implementation(const FGameplayEffectCustomExecuti
 		Damage *= FMath::Max(0.f, DamageTaken);
 	}
 
+	// ③a 完美闪避 —— 放在格挡【前面】：闪避的语义是「这一下根本没打到我」，
+	//     它不该被朝向判定（格挡要求面朝来源）之类的前提影响，也不该和格挡抢同一次命中。
+	//     真躲掉了就直接把伤害归零、回蓝、放子弹时间（见 UDodgeComponent）。
+	//     返回值这里不用看：函数已经把 InOutDamage 就地改成 0，下面 ④ 的 `> 0` 判断自然会跳过。
+	UDodgeComponent::TryNegateIncomingDamage(TargetASC, Spec.GetContext().GetEffectCauser(), Damage);
+
 	// ③ 格挡 / 免疫 —— 全项目唯一的减免入口，就这一行。
 	//    传 causer 而不是 avatar：朝向判定要比的是「这一击从哪来」。
 	UBlockComponent::TryMitigateIncomingDamage(TargetASC, Spec.GetContext().GetEffectCauser(), Damage);
@@ -152,8 +205,38 @@ void UExecCalc_Damage::Execute_Implementation(const FGameplayEffectCustomExecuti
 			UHeroCombatAttributeSet::GetHealthAttribute(), EGameplayModOp::Additive, -Damage));
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[Damage] 攻=%.1f 倍率=%.2f 固定=%.1f 斩杀=%.2f → 结算=%.1f 类型=%s 目标=%s"),
-		AttackDamage, Multiplier, FlatDamage, MissingHealthBonus, Damage,
+	// ⑤ 吸血。放在 ④ 之后：回血量按【最终造成的伤害】算（减抗、暴击、格挡之后），
+	//    被 100% 挡掉的伤害不该回血 —— 和 LoL 的口径一致（Omnivamp 按实际伤害结算）。
+	//
+	// 【为什么在 ExecCalc 里施加回血】伤害结算只有这一个服务端入口，攻击者面板在这里全部拿得到；
+	// 挪到 PostGameplayEffectExecute 的话就得从 EffectContext 里反查攻击者的 ASC，多一跳还没有面板。
+	// BlockComponent 已经有「在 ExecCalc 里动 GE」的先例（见那边 129 行的注释），安全性同源。
+	const float Omnivamp  = FMath::Max(0.f, Capture(DamageStatics().OmnivampDef));
+	const float LifeSteal = FMath::Max(0.f, Capture(DamageStatics().LifeStealDef));
+	const bool bBasicAttack = AssetTags.HasTag(LOLGameplayTags::Data_BasicAttack);
+	const float VampFraction = Omnivamp + (bBasicAttack ? LifeSteal : 0.f);
+
+	if (Damage > 0.f && VampFraction > 0.f && SourceASC != TargetASC
+		// 回血 GE 挂的是 Health 修正符：攻击者没有属性集（纯装饰/机制的 ASC）就别试，
+		// 那只会刷一条「找不到属性」的警告，什么都回不上。
+		&& SourceASC->HasAttributeSetForAttribute(UHeroCombatAttributeSet::GetHealthAttribute()))
+	{
+		const float HealAmount = Damage * VampFraction;
+
+		FGameplayEffectContextHandle HealContextHandle = SourceASC->MakeEffectContext();
+		const FGameplayEffectSpecHandle HealSpec =
+			SourceASC->MakeOutgoingSpec(UGE_Heal::StaticClass(), /*Level=*/1.f, HealContextHandle);
+		if (HealSpec.IsValid())
+		{
+			HealSpec.Data->SetSetByCallerMagnitude(LOLGameplayTags::Data_Heal, HealAmount);
+			SourceASC->ApplyGameplayEffectSpecToSelf(*HealSpec.Data.Get());
+		}
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[Damage] 攻=%.1f 倍率=%.2f 固定=%.1f 斩杀=%.2f 暴击=%d(率%.2f 倍%.2f) → 结算=%.1f 吸血=%.2f(全能%.2f 偷取%.2f 普攻=%d) 类型=%s 目标=%s"),
+		AttackDamage, Multiplier, FlatDamage, MissingHealthBonus,
+		bCrit ? 1 : 0, CritChance, CritDamage, Damage,
+		VampFraction, Omnivamp, LifeSteal, bBasicAttack ? 1 : 0,
 		bTrueDamage ? TEXT("真实") : (bMagic ? TEXT("魔法") : TEXT("物理")),
 		*GetNameSafe(TargetASC->GetAvatarActor()));
 }

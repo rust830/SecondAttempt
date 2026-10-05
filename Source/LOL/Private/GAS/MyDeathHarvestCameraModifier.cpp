@@ -1,18 +1,9 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "GAS/MyDeathHarvestCameraModifier.h"
+#include "CameraModifierLerp.h"
 #include "Engine/Scene.h"
 #include "Materials/MaterialInterface.h"
-
-namespace
-{
-	// FMath::Lerp 对 FVector4(双精度) + float 的组合会模板推导失败（标量那侧推不出同一类型），
-	// 和 MyStealthCameraModifier.cpp 里那个同名小工具是同一件事。
-	FVector4 LerpVector4(const FVector4& From, const FVector4& To, float Alpha)
-	{
-		return From + (To - From) * (double)Alpha;
-	}
-}
 
 UMyDeathHarvestCameraModifier::UMyDeathHarvestCameraModifier()
 {
@@ -53,7 +44,7 @@ void UMyDeathHarvestCameraModifier::ModifyPostProcess(float DeltaTime, float& Po
 	// 内置参数：PP 每帧都是从相机基准值重新算的，所以这里不会累积，
 	// 直接按 Alpha 从「当前值」往目标插一次即可。
 	PP.bOverride_ColorSaturation = true;
-	PP.ColorSaturation = LerpVector4(PP.ColorSaturation,
+	PP.ColorSaturation = CameraLerpVector4(PP.ColorSaturation,
 		FVector4(VoidSaturation, VoidSaturation, VoidSaturation, 1.0), Alpha);
 
 	PP.bOverride_VignetteIntensity = true;

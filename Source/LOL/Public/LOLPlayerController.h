@@ -11,6 +11,7 @@ class UInputMappingContext;
 class UUserWidget;
 class UInputAction;
 class UInputConfig;
+class UHeroAttributePanelConfig;
 class UHeroHUDController;
 class UHeroHUDSlotConfig;
 struct FInputActionValue;
@@ -45,6 +46,15 @@ protected:
 	/** Basic attack (LMB) Input Action */
 	UPROPERTY(EditAnywhere, Category="Input")
 	TObjectPtr<UInputAction> BasicAttackAction;
+
+	/**
+	 * 展开 / 收起属性面板（建议映射到 C 键）。
+	 *
+	 * 留空 = 这个键不工作，其余照常 —— 和别的 InputAction 一样，不配就是没绑定，
+	 * 不需要额外的开关变量。
+	 */
+	UPROPERTY(EditAnywhere, Category="Input")
+	TObjectPtr<UInputAction> ToggleAttributePanelAction;
 
 	/** Input Mapping Contexts */
 	UPROPERTY(EditAnywhere, Category ="Input|Input Mappings")
@@ -96,6 +106,14 @@ protected:
 	 */
 	UPROPERTY(EditDefaultsOnly, Category = "HUD")
 	TObjectPtr<UHeroHUDSlotConfig> HUDSlotConfig;
+
+	/**
+	 * 属性面板配置：显示哪些属性、按什么顺序、常驻哪几条。
+	 * 同时决定 HUD 订阅哪几条属性（见 UHeroHUDController::BindSelf），所以【不能为空】——
+	 * 为空时面板是空的，Controller 会打一条 Warning。
+	 */
+	UPROPERTY(EditDefaultsOnly, Category = "HUD")
+	TObjectPtr<UHeroAttributePanelConfig> AttributePanelConfig;
 
 public:
 
@@ -156,6 +174,14 @@ private:
 
 	/** Raw mouse fallback so the current template map works without creating another Input Action asset. */
 	void BasicAttackStarted();
+
+	/**
+	 * 属性面板开关（ToggleAttributePanelAction，Started）。
+	 *
+	 * HUD 还没建 / 没挂面板时静默 return —— 和 NotifyHUDTryBind 一样是幂等的空操作，
+	 * 不值得为「开局第一帧按了 C」报警告。
+	 */
+	void ToggleAttributePanelStarted();
 
 	/** Called for ability slot input (QWER/DF) */
 	void AbilityInputStarted(FGameplayTag SlotTag);

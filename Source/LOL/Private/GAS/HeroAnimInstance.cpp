@@ -3,12 +3,15 @@
 #include "GAS/HeroAnimInstance.h"
 
 #include "GAS/HeroAnimationSet.h"
+#include "GAS/LOLGameplayTags.h"
 #include "GAS/MyAbilitySystemComponent.h"
 #include "AbilitySystemComponent.h"
 #include "Animation/AnimSequenceBase.h"
 #include "Animation/BlendSpace.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "KismetAnimationLibrary.h"   // 5.8 里 UKismetAnimationLibrary 在 AnimGraphRuntime 模块，不是 Kismet
+#include "Components/SkeletalMeshComponent.h"
 
 void UHeroAnimInstance::NativeInitializeAnimation()
 {
@@ -28,11 +31,75 @@ void UHeroAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 {
 	Super::NativeUpdateAnimation(DeltaSeconds);
 
+	// FormUnarmed 每帧向目标值平滑逼近 —— 这是整个形态管线里 FormUnarmed 的唯一写入点。
+	// 放在 ASC 解析之前：标签变化（bTagsDirty → RefreshAnimSelection）只重算 FormUnarmedTarget，
+	// 解析失败的那几帧过渡照常进行、不中断。FormBlendSpeed = 0 是瞬切兜底。
+	//
+	// 【空中强制回持刀】sprint 上身混合（ABP 的 LBPB 那层）只覆盖地面移动——
+	// 跳跃/下落/闪避飞行时腿是 Jump 动画、上身却还是疾跑摆臂，必然穿帮。
+	// 目标值按 IsFalling 折算成 0，FInterpTo 负责平滑：起跳渐变回持刀、
+	// 落地渐变回空手，没有硬切。EvaluteFormTarget 每帧跑，标签没变也能响应离地。
+	const bool bAirborne = OwnerCharacter.IsValid() && OwnerCharacter->GetCharacterMovement()
+		&& OwnerCharacter->GetCharacterMovement()->IsFalling();
+	const float EffectiveFormTarget = bAirborne ? 0.f : FormUnarmedTarget;
+	if (FormBlendSpeed > 0.f)
+	{
+		FormUnarmed = FMath::FInterpTo(FormUnarmed, EffectiveFormTarget, DeltaSeconds, FormBlendSpeed);
+	}
+	else
+	{
+		FormUnarmed = EffectiveFormTarget;
+	}
+
 	UpdateGroundSpeed();
+	UpdateMovementDirection();
+
+	// 【脚步 IK 权重】只管地面跑动：空中/静止一律 0。
+	// 见头文件里 FootIKAlpha 的注释（为什么不能常开 —— 会顶髋）。
+	// bAirborne 在上面算过了（IsFalling）；GroundSpeed 在上面刚更新。
+	FootIKAlpha = (!bAirborne && GroundSpeed > FootIKMinSpeed) ? 1.f : 0.f;
+
+	// 【空手藏剑】weapon_l / weapon_r（lowerarm 子骨）→ sword_root_l/r → sword_handle_l/r
+	// 是主武器的蒙皮骨架，整把剑的顶点都绑在这棵子树上。空手 idle（Idle_TravelMode 系）
+	// 把武器骨摆在背鞘位所以看不见；但跑步上身一旦混到 JogFwdSlopeLean（样点是持武器跑），
+	// 武器骨被摆回右手握持位 —— 剑就"闪现"到手里。剑没有独立网格组件，唯一的可靠藏法
+	// 就是 HideBone：直接把该骨及子树的蒙皮几何整个关掉，切回持剑形态再恢复。
+	// 阈值 0.5 与 ABP 外层 TwoWayBlend 的可视语义一致（哪边权重过半算哪边）。
+	// 注意：dagger_base_l/r（两把匕首）是 lowerarm 下另一棵独立子树，这里不碰。
+	if (ACharacter* Character = OwnerCharacter.Get())
+	{
+		if (USkeletalMeshComponent* MeshComp = Character->GetMesh())
+		{
+			static const FName WeaponL(TEXT("weapon_l"));
+			static const FName WeaponR(TEXT("weapon_r"));
+			// ⚠️⚠️ 判据用 FormUnarmedTarget（真实形态）而不是 FormUnarmed（平滑后的权重）。
+			//   FormUnarmed 会被上面那段「空中强制回持刀」折成 0（IsFalling 时目标值取 0，
+			//   因为空中腿是 Kallari 自带的 Jump 动画、姿势必须配套回持刀）——
+			//   而藏剑跟着它走的话，**空手形态一按下跳跃就会把剑亮出来**（用户 2026-10-03 实测）。
+			//   「动画回持刀」和「有没有剑」是两件事：姿势可以回持刀，剑必须按真实形态藏。
+			// bSwordForceVisible：拔刀 montage 期间由 GA_FormSwitch 置位，短路藏剑判定，
+			// 让「拔刀」的全过程剑都在手里可见（否则要等 FormUnarmed 平滑过 0.5 才出现）。
+			const bool bWantHide = FormUnarmedTarget > 0.5f && !bSwordForceVisible;
+
+			const bool bNowHidden = MeshComp->IsBoneHiddenByName(WeaponL);
+			if (bWantHide && !bNowHidden)
+			{
+				MeshComp->HideBoneByName(WeaponL, EPhysBodyOp::PBO_None);
+				MeshComp->HideBoneByName(WeaponR, EPhysBodyOp::PBO_None);
+				// 【装饰骨一起藏】见下面那段的长注释。
+				HideUnarmedDecorationBones(MeshComp, true);
+			}
+			else if (!bWantHide && bNowHidden)
+			{
+				MeshComp->UnHideBoneByName(WeaponL);
+				MeshComp->UnHideBoneByName(WeaponR);
+				HideUnarmedDecorationBones(MeshComp, false);
+			}
+		}
+	}
 
 	if (!TryResolveAbilitySystem())
-	{
-		// ASC 还没到（客户端上很常见）。速度已经更新了，移动层照常能用；
+	{		// ASC 还没到（客户端上很常见）。速度已经更新了，移动层照常能用；
 		// 标签相关的选择维持上一帧的结果而不清空 —— 清空的话每次重生/重连
 		// 都会看到动画闪一下再回来。
 		return;
@@ -119,6 +186,11 @@ void UHeroAnimInstance::OnAnyTagChanged(const FGameplayTag Tag, int32 NewCount)
 
 void UHeroAnimInstance::RefreshAnimSelection()
 {
+	// 形态目标值在这里重算（而不是 AnimSet 的规则表里）：
+	// 它是「身上有没有 State.Form.Unarmed」的单条布尔事实，不需要 Query 引擎，
+	// 而且它必须在 AnimSet 判空的 early-return 之前 —— 没配动画表的英雄形态切换照样要工作。
+	FormUnarmedTarget = CachedASC.IsValid() && CachedASC->HasMatchingGameplayTag(LOLGameplayTags::State_Form_Unarmed) ? 1.f : 0.f;
+
 	// 先清干净：AnimSet 被清空、或规则被改空之后，不该留着上一次的结果。
 	CurrentLocomotion = nullptr;
 	CurrentOverride = nullptr;
@@ -155,6 +227,67 @@ void UHeroAnimInstance::RefreshAnimSelection()
 		bOverrideLoop ? 1 : 0);
 }
 
+void UHeroAnimInstance::HideUnarmedDecorationBones(USkeletalMeshComponent* MeshComp, bool bHide)
+{
+	// =========================================================================
+	// 【为什么藏这些骨 —— 重定向动画的固有缺口，不是配置疏漏】
+	//
+	// IK Retargeter 只驱动 IK Rig 链上的骨，也就是【源骨架（Manny）有的那批】。
+	// 目标骨架（Kallari）独有的骨在重定向出来的动画里【一条轨道都没有】，
+	// 于是它们全部停在 mesh 的 ref pose 上：
+	//
+	//   waste_hood_* / hood_*_dyn   背后兜帽 + 动态兜帽
+	//   tentacle_*                  背上的触须（Kallari 的招牌）
+	//   thruster*                   背部推进器
+	//
+	// 持刀形态看不出来（Kallari 自带动画驱动全部 141 根骨，它们会正常摆动），
+	// 一进重定向动画（空手 idle / 走 / 跳）就停在 ref pose ⇒ 从背后支棱出来。
+	// 用户 2026-10-03 实测：「idle 模型用的是 travelmode 的，他的背包多露出了一些骨骼」。
+	//
+	// 藏它们和藏剑是同一个机制（HideBone 关掉该骨及子树的蒙皮几何），所以复用。
+	// 判据跟着藏剑走（FormUnarmedTarget），空手才藏、持刀原样恢复。
+	//
+	// ⚠️⚠️ 【故意不藏的骨】
+	//   upperarm_twist_01/02_* / thigh_twist_* / calf_twist_01_*
+	//   —— 这些是【身体内部的扭转骨】，藏了会破坏蒙皮（手臂/腿会变形）。
+	//   它们同样不被重定向驱动，这正是用户说的「全身骨骼排列有微妙差异、动作很僵硬」，
+	//   但要解决只能给重定向动画补上这些骨的轨道（从 Kallari 自带动画拷对应轨道，
+	//   或者在 IK Rig 里把它们加进链），不是藏能解决的 —— 留作后续专项。
+	// =========================================================================
+	static const FName DecorationBones[] = {
+		// 兜帽（含 ref pose 里最容易支棱出来的后背那一片）
+		TEXT("waste_hood_bk"), TEXT("waste_hood_fr_l"), TEXT("waste_hood_fr_r"),
+		TEXT("waste_hood_l"), TEXT("waste_hood_r"),
+		TEXT("hood_l_dyn"), TEXT("hood_r_dyn"), TEXT("hood_c_dyn"),
+		// 触须
+		TEXT("tentacle_spring_l"), TEXT("tentacle_spring_r"),
+		TEXT("tentacle_l_01"), TEXT("tentacle_l_02"), TEXT("tentacle_l_03"), TEXT("tentacle_l_04"),
+		TEXT("tentacle_l_05"), TEXT("tentacle_l_06"), TEXT("tentacle_l_07"), TEXT("tentacle_l_08"),
+		TEXT("tentacle_l_09"), TEXT("tentacle_l_010"),
+		TEXT("tentacle_r_01"), TEXT("tentacle_r_02"), TEXT("tentacle_r_03"), TEXT("tentacle_r_04"),
+		TEXT("tentacle_r_05"), TEXT("tentacle_r_06"), TEXT("tentacle_r_07"), TEXT("tentacle_r_08"),
+		TEXT("tentacle_r_09"), TEXT("tentacle_r_010"),
+		// 背部推进器
+		TEXT("thruster_casing_l"), TEXT("thruster_casing_r"),
+		TEXT("thruster_a_l"), TEXT("thruster_b_l"), TEXT("thruster_c_l"),
+		TEXT("thruster_a_r"), TEXT("thruster_b_r"), TEXT("thruster_c_r"),
+		TEXT("thrusterVent_l_01"), TEXT("thrusterVent_l_02"),
+		TEXT("thrusterVent_r_01"), TEXT("thrusterVent_r_02"),
+	};
+
+	for (const FName& Bone : DecorationBones)
+	{
+		if (bHide)
+		{
+			MeshComp->HideBoneByName(Bone, EPhysBodyOp::PBO_None);
+		}
+		else
+		{
+			MeshComp->UnHideBoneByName(Bone);
+		}
+	}
+}
+
 void UHeroAnimInstance::UpdateGroundSpeed()
 {
 	const ACharacter* Character = OwnerCharacter.Get();
@@ -172,6 +305,29 @@ void UHeroAnimInstance::UpdateGroundSpeed()
 	// 以后要是给 Jog/Sprint 蒙太奇开了 root motion，这一句得改成读蒙太奇自己的位移，
 	// 否则速度是 0、混合空间永远停在 idle 格。
 	GroundSpeed = Character->GetCharacterMovement()->Velocity.Size2D();
+}
+
+void UHeroAnimInstance::UpdateMovementDirection()
+{
+	const ACharacter* Character = OwnerCharacter.Get();
+	if (!Character || !Character->GetCharacterMovement())
+	{
+		MovementDirection = 0.f;
+		return;
+	}
+
+	// 速度趋零时方向是噪声（atan2 的两个输入都趋 0），保持上一帧的值。
+	// 见头文件 MovementDirection 属性上的注释（BS 已落 idle 行，保留方向还有减速过渡的好处）。
+	if (Character->GetCharacterMovement()->Velocity.Size2D() < 5.f)
+	{
+		return;
+	}
+
+	// CalculateDirection：速度相对角色朝向的夹角（-180..180，正 = 身体右侧）。
+	// 这正是方向 BS 横轴的标准约定（模板 BS_Idle_Walk_Run 同款：-45 = 左前，+90 = 正右）。
+	MovementDirection = UKismetAnimationLibrary::CalculateDirection(
+		Character->GetCharacterMovement()->Velocity,
+		Character->GetActorRotation());
 }
 
 void UHeroAnimInstance::UpdateLocomotionPlayRate()

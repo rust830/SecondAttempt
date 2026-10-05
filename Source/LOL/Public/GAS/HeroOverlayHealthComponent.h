@@ -24,6 +24,7 @@
 #include "Components/WidgetComponent.h"
 #include "GameplayTagContainer.h"
 #include "GameplayEffectTypes.h"
+#include "GAS/HUDAttributeBinding.h"
 #include "HeroOverlayHealthComponent.generated.h"
 
 class UAbilitySystemComponent;
@@ -108,17 +109,17 @@ private:
 	/** 读一遍真值、翻成 UI 语义、推给 Widget。绑完要显式调一次（绑定不触发初始值）。 */
 	void Refresh();
 
-	void OnHealthChanged(const FOnAttributeChangeData& Data);
-	void OnMaxHealthChanged(const FOnAttributeChangeData& Data);
+	/** 血 / 最大血共用这一个回调：处理逻辑一样（重算一遍再推），分两个只会多一个漏绑的机会。 */
+	void OnVitalsAttributeChanged(const FOnAttributeChangeData& Data);
 	void OnDeadTagChanged(const FGameplayTag ChangedTag, int32 NewCount);
 
 	UPROPERTY(Transient)
 	TWeakObjectPtr<AActor> ObservedActor;
 
+	/** 绑定的 ASC。只读数值 + 判 binding 是否还在用，所以留着它，不和句柄记账合并。 */
 	UPROPERTY(Transient)
 	TWeakObjectPtr<UAbilitySystemComponent> BoundASC;
 
-	FDelegateHandle HealthHandle;
-	FDelegateHandle MaxHealthHandle;
-	FDelegateHandle DeadTagHandle;
+	/** 属性委托 + 标签事件的记账（和 UHeroHUDController 共用同一份实现）。 */
+	FHUDAttributeBinding Binding;
 };

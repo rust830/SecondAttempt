@@ -4,10 +4,16 @@
 #include "GAS/MyGameplayAbility.h"
 #include "GAS/AbilitySet.h"
 #include "GAS/BlockComponent.h"
+#include "GAS/DodgeComponent.h"
 #include "GAS/MyPlayerState.h"
 #include "GAS/HeroCombatAttributeSet.h"
+#include "GAS/HeroDefinition.h"
+#include "GAS/HeroStatConfig.h"
 #include "GAS/GE_Death.h"
+#include "Animation/HeroEvadeAnimDriver.h"
 #include "AbilitySystemComponent.h"
+#include "Animation/AnimInstance.h"
+#include "Animation/AnimMontage.h"
 #include "AbilitySystemBlueprintLibrary.h"
 #include "GAS/LOLGameplayTags.h"
 #include "Components/CapsuleComponent.h"
@@ -27,8 +33,23 @@ AHeroCombatCharacter::AHeroCombatCharacter()
 	// 格挡/免疫判定组件。ASC 不在这里拿（挂在 PlayerState 上），等 InitializeAbilityActorInfo。
 	BlockComponent = CreateDefaultSubobject<UBlockComponent>(TEXT("BlockComponent"));
 
+	// 完美闪避的判定与奖励（窗口是 GE 标签，这里只管判定）。ASC 同样等 InitializeAbilityActorInfo。
+	DodgeComponent = CreateDefaultSubobject<UDodgeComponent>(TEXT("DodgeComponent"));
+
+	// 闪避 BlendSpace 驱动。纯本地表现组件，能力通过 GetEvadeAnimDriver() 拿它起手。
+	EvadeAnimDriver = CreateDefaultSubobject<UHeroEvadeAnimDriver>(TEXT("EvadeAnimDriver"));
+
 	// 死亡状态 GE。放默认值而不是要求每个 BP 都填：漏填的表现是「血到 0 什么都不发生」。
 	DeathEffect = UGE_Death::StaticClass();
+
+	// 【起步加速度】MoveSpeed 属性的语义是「目标最大速度」，实际速度按这个斜率爬上去。
+	// 不设的话用引擎默认 2048 —— 对 MoveSpeed=345 来说约 0.17s 就到位，几乎没有加速过程。
+	// 1200 配 345 约 0.29s，和 LoL 疾跑那种「有起步但不久」的手感接近。
+	// 做成 UPROPERTY 是为了能在 BP 里按英雄调（见头文件 MoveAccelSpeed 的注释）。
+	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	{
+		Movement->MaxAcceleration = MoveAccelSpeed;
+	}
 }
 
 void AHeroCombatCharacter::BeginPlay()
@@ -78,6 +99,12 @@ void AHeroCombatCharacter::InitializeAbilityActorInfo()
 		BlockComponent->BindToAbilitySystem(AbilitySystemComponent);
 	}
 
+	// 完美闪避组件同理（同一个时序理由）。
+	if (DodgeComponent)
+	{
+		DodgeComponent->BindToAbilitySystem(AbilitySystemComponent);
+	}
+
 	// 死亡入口。属性集内部已经只认权威端（见 PostGameplayEffectExecute），这里不用再判一次。
 	// 先摘再挂：这个函数会被调两次（服务端 PossessedBy / 客户端 OnRep_PlayerState），
 	// 挂两层的话一次死亡会广播两次。
@@ -114,11 +141,83 @@ void AHeroCombatCharacter::InitializeAbilityActorInfo()
 	ApplyMoveSpeedToMovement();
 
 	// 服务端授予英雄技能组（被动 + QWER）。召唤师技能在 PlayerState 里授予。只授一次。
-	if (HasAuthority() && !bAbilitiesGranted && ChampionKit)
+	if (HasAuthority() && !bAbilitiesGranted)
 	{
-		ChampionKit->GiveToAbilitySystem(AbilitySystemComponent);
-		bAbilitiesGranted = true;
+		if (UAbilitySet* Kit = ResolveChampionKit())
+		{
+			Kit->GiveToAbilitySystem(AbilitySystemComponent);
+			bAbilitiesGranted = true;
+		}
 	}
+
+	// 服务端施加英雄数值。【就在这里】的理由：这是唯一同时满足三个条件的时机 ——
+	// 服务端、只做一次、且 ASC 已经 InitAbilityActorInfo（属性集的构造函数读不到英雄配置，
+	// 那一刻没有 Pawn 也没有英雄身份，所以只能在这个时机补上）。
+	//
+	// 等级从 PlayerState 读，不在 Pawn 上存 —— 见 AMyPlayerState 里那段。
+	if (HasAuthority() && !bStatsApplied)
+	{
+		ApplyChampionStats();
+		bStatsApplied = true;
+	}
+}
+
+UAbilitySet* AHeroCombatCharacter::ResolveChampionKit() const
+{
+	if (HeroDefinition)
+	{
+		// 两套都填了：Def 那份生效。这是最容易踩的坑（改了旧字段没反应），所以要说出来。
+		if (ChampionKit && ChampionKit != HeroDefinition->ChampionKit)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[Hero] %s 同时填了 HeroDefinition 和 ChampionKit → 以 HeroDefinition（%s）为准，ChampionKit（%s）被忽略"),
+				*GetNameSafe(this), *GetNameSafe(HeroDefinition->ChampionKit), *GetNameSafe(ChampionKit));
+		}
+		return HeroDefinition->ChampionKit;
+	}
+
+	// 没配 HeroDefinition 就退回老字段（已经接好的蓝图靠这条路继续跑）。
+	return ChampionKit;
+}
+
+UHeroStatConfig* AHeroCombatCharacter::ResolveChampionStats() const
+{
+	if (HeroDefinition)
+	{
+		if (ChampionStats && ChampionStats != HeroDefinition->Stats)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[Hero] %s 同时填了 HeroDefinition 和 ChampionStats → 以 HeroDefinition（%s）为准，ChampionStats（%s）被忽略"),
+				*GetNameSafe(this), *GetNameSafe(HeroDefinition->Stats), *GetNameSafe(ChampionStats));
+		}
+		return HeroDefinition->Stats;
+	}
+
+	return ChampionStats;
+}
+
+void AHeroCombatCharacter::ApplyChampionStats()
+{
+	// 【只在权威端算】。两个调用点本来就都门过 authority 了，这里是第三道：
+	// 它是 BlueprintCallable 的，从 BP 里调进来时不该有第二条语义。
+	// 客户端不需要也不该算 —— 属性值会随属性集复制下来，本地算一遍是第二条真相。
+	if (!HasAuthority()) return;
+
+	// InitAbilityActorInfo 之前 / 观战这类没有 ASC 的情况：静默跳过。
+	// 不吵是因为这【不是】错误 —— 这个函数会被重复调用（授予、升级各一次），
+	// 而每次调用时 ASC 是否就绪由调用点保证（两边都在 InitializeAbilityActorInfo 之后）。
+	if (!AbilitySystemComponent) return;
+
+	UHeroCombatAttributeSet* Attributes =
+		const_cast<UHeroCombatAttributeSet*>(AbilitySystemComponent->GetSet<UHeroCombatAttributeSet>());
+	if (!Attributes) return;
+
+	// 等级住在 PlayerState。没有 PS（比如纯 AI 训练假人）就按 1 级算 ——
+	// 1 级 = 只吃 Base，和构造函数刚建出来的结果一致。
+	const AMyPlayerState* PS = GetPlayerState<AMyPlayerState>();
+	const int32 Level = PS ? PS->GetHeroLevel() : 1;
+
+	Attributes->ApplyStats(ResolveChampionStats(), Level);
 }
 
 void AHeroCombatCharacter::OnMoveSpeedChanged(const FOnAttributeChangeData& Data)
@@ -143,12 +242,33 @@ void AHeroCombatCharacter::ApplyMoveSpeedToMovement()
 	// 那是「禁锢」类效果该干的事，不该由这里顺手做掉）。
 	if (Speed <= 0.f) return;
 
+	// 【语义】MoveSpeed 是【目标最大速度】，不是当前速度。实际速度由 UE 的移动组件
+	// 按 MaxAcceleration 渐进爬上去 —— 所以这里只改上限，不去直接设 Velocity。
+	// 这么做的两个好处：
+	//   ① 移速 buff/减益（UGE_Slow 之类）生效时是「加速过去」而不是「瞬移」；
+	//   ② 当前速度连续变化 ⇒ AnimInstance 的 GroundSpeed（Velocity.Size2D）连续
+	//      ⇒ BlendSpace 自己会插值，不需要为"中途变速"做任何额外适配。
 	Movement->MaxWalkSpeed = Speed;
 }
 
 bool AHeroCombatCharacter::IsDead() const
 {
 	return AbilitySystemComponent && AbilitySystemComponent->HasMatchingGameplayTag(LOLGameplayTags::State_Dead);
+}
+
+bool AHeroCombatCharacter::IsHardControlled() const
+{
+	if (!AbilitySystemComponent)
+	{
+		return false;
+	}
+
+	// 三个标签任一命中即算硬控。和 UMyGameplayAbility 构造函数里那三条 ActivationBlockedTags 一一对应 ——
+	// 那边管「技能能不能放」，这里管「人能不能动」，判据必须是同一套标签，否则会出现
+	// 「技能灰了但人还能跑」这种只在一半地方生效的硬控。
+	return AbilitySystemComponent->HasMatchingGameplayTag(LOLGameplayTags::State_Stunned)
+		|| AbilitySystemComponent->HasMatchingGameplayTag(LOLGameplayTags::State_Knockback)
+		|| AbilitySystemComponent->HasMatchingGameplayTag(LOLGameplayTags::State_KnockUp);
 }
 
 void AHeroCombatCharacter::HandleOutOfHealth(AActor* DamageInstigator, AActor* DamageCauser)
@@ -227,16 +347,54 @@ void AHeroCombatCharacter::EnterDeathState()
 
 	// ③ 布娃娃。纯本地表现：骨骼网格的相对变换不复制，各端各自模拟 —— 看起来都是「倒下去」，
 	//    具体姿势每端略有出入。这是常规取舍，不是 bug。
+	UE_LOG(LogTemp, Warning, TEXT("[Death] %s 分支决策：bRagdollOnDeath=%d DeathMontage=%s Front=%s Back=%s 方向=%d"),
+		*GetNameSafe(this), bRagdollOnDeath ? 1 : 0,
+		*GetNameSafe(DeathMontage.Get()), *GetNameSafe(DeathFrontMontage.Get()),
+		*GetNameSafe(DeathBackMontage.Get()), static_cast<int32>(LastHitDirection));
+
 	if (bRagdollOnDeath)
 	{
 		if (USkeletalMeshComponent* MeshComp = GetMesh())
 		{
 			// 先换碰撞配置再开物理：反过来的话会有一帧用 CharacterMesh（QueryOnly）去模拟。
 			MeshComp->SetCollisionProfileName(TEXT("Ragdoll"));
+			// 组件级物理必须开。只调 SetAllBodiesSimulatePhysics 只会把每个 body 标成 simulate，
+			// 但 SkeletalMeshComponent 的 bSimulatePhysics 仍是 false —— 这时 bBlendPhysics 混出来的
+			// 是一个没正确初始化的物理姿态，表现就是尸体四肢被拉得又长又歪。
+			// 项目里能正常布娃娃的 CombatCharacter::HandleDeath 就是这么做的（SetSimulatePhysics(true)）。
+			// SetSimulatePhysics(true) 内部已经会开启所有 body，这里再显式标一次只是更清楚。
+			MeshComp->SetSimulatePhysics(true);
 			MeshComp->SetAllBodiesSimulatePhysics(true);
 			MeshComp->WakeAllRigidBodies();
 			MeshComp->bBlendPhysics = true;
 		}
+	}
+	// ④ 死亡蒙太奇。方向取「致命那一下记下的受击方位」——从前面打死往后倒、从背后打
+	//    往前扑。没记到方向时用默认（Front），该方向没配则退回 DeathMontage，
+	//    见 ResolveDeathMontage。
+	//
+	//    和布娃娃互斥（见 DeathMontage 的注释）：两边都开的话物理和动画会
+	//    同时写骨骼，表现就是四肢被拉长。
+	//
+	//    播在 EnterDeathState 里而不是某个技能/GameplayCue 里，是因为这一段两端都会跑
+	//    （服务端 PossessedBy 和客户端 OnRep_PlayerState 各一次），蒙太奇是纯表现、
+	//    不需要网络同步，本地各播各的正好。专用服务器上没有 AnimInstance，PlayAnimMontage
+	//    自己会判空返回，不用额外挡。
+	else if (UAnimMontage* Death = ResolveDeathMontage(LastHitDirection))
+	{
+		// 这里是唯一的调用点，返回 0 就意味着没播出去（AnimInstance 空 / 网格还没初始化 /
+		// 槽位不匹配）。它以前是 Verbose，默认不出现在日志里 —— 排查"死亡动画不播"时
+		// 完全看不到这一环，所以提到 Warning，并把它返回的时长打出来。
+		UAnimInstance* AnimInst = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr;
+		const float Played = PlayAnimMontage(Death);
+		UE_LOG(LogTemp, Warning, TEXT("[Death] %s 死亡蒙太奇 %s（方向=%d，%s）AnimInstance=%s PlayAnimMontage 返回=%.3f"),
+			*GetNameSafe(this), *GetNameSafe(Death), static_cast<int32>(LastHitDirection),
+			bHasHitDirection ? TEXT("受击 cue 记下的") : TEXT("没记到方向，用默认值"),
+			AnimInst ? *AnimInst->GetClass()->GetName() : TEXT("<null>"), Played);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Death] %s 死亡蒙太奇【没有可播的】：ResolveDeathMontage 返回空"), *GetNameSafe(this));
 	}
 }
 
@@ -256,13 +414,27 @@ void AHeroCombatCharacter::ExitDeathState()
 			MeshComp->AttachToComponent(GetCapsuleComponent(), FAttachmentTransformRules::SnapToTargetNotIncludingScale);
 			MeshComp->SetRelativeLocationAndRotation(DefaultMeshRelativeLocation, DefaultMeshRelativeRotation);
 			MeshComp->SetCollisionProfileName(DefaultMeshCollisionProfileName);
+			// 网格按 Profile 名还原会把「角色不挡相机」的响应抹掉，这里补回来。
+			MeshComp->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
 		}
 	}
 
+	// ①-b 收死亡蒙太奇。蒙太奇资产上关了 Enable Auto Blend Out，不主动停的话
+	//      它是「定格在最后一帧」而不是结束 —— 复活后会顶着死亡姿势走起来。
+	//      传 nullptr = 停当前正在播的那条：死亡蒙太奇是按方向挑的，这里未必知道是哪条。
+	if (!bRagdollOnDeath)
+	{
+		StopAnimMontage(nullptr);
+	}
+
 	// ② 碰撞和移动还原。
+	//    【不要按 Profile 名还原胶囊】死亡前我们给胶囊单独改过 ECC_Camera 的响应（角色不挡相机），
+	//    按 Profile 名还原会把那个改动抹掉；更糟的是 Profile 名取不到时会落到 NoCollision，
+	//    整个胶囊变成无碰撞 —— 复活后穿墙掉地就是它。
+	//    死亡只做了 SetCollisionEnabled(NoCollision)，这里对称地开回来即可：响应数组原样保留。
 	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
 	{
-		Capsule->SetCollisionProfileName(DefaultCapsuleCollisionProfileName);
+		Capsule->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	}
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
 	{
@@ -283,13 +455,22 @@ void AHeroCombatCharacter::ExitDeathState()
 
 	if (AbilitySystemComponent)
 	{
-		if (const UHeroCombatAttributeSet* Attributes = AbilitySystemComponent->GetSet<UHeroCombatAttributeSet>())
+		// 只用它在确认「属性集在」（ASC 挂了但属性集还没建好的那一瞬也要跳过）。
+		if (AbilitySystemComponent->GetSet<UHeroCombatAttributeSet>())
 		{
 			// 直接写基础值：复活重置不是「可被减免/驱散的治疗」，不该走 GE
 			// （走 GE 的话 BlockComponent 可能把它算成伤害、以后加了重伤也会被削）。
-			// PreAttributeBaseChange 会把值钳进 [0, MaxHealth]，这里传 MaxHealth 正好落回来。
-			AbilitySystemComponent->SetNumericAttributeBase(UHeroCombatAttributeSet::GetHealthAttribute(), Attributes->GetMaxHealth());
-			AbilitySystemComponent->SetNumericAttributeBase(UHeroCombatAttributeSet::GetEnergyAttribute(), Attributes->GetMaxEnergy());
+			//
+			// ⚠️ 写的是 MaxHealth 的【base】而不是当前值。当前值里含装备/海克斯的
+			// 「最大生命 +200」修正符 —— 拿它当 base 写回去，等于把那 200 永久焊进基础值，
+			// 之后每次重算都会被重复计入（卸装备也缩不回去）。复活本来就该满血，
+			// 满的是「上限的 base + 修正符」这个当前值，所以两边都取 base 口径。
+			AbilitySystemComponent->SetNumericAttributeBase(
+				UHeroCombatAttributeSet::GetHealthAttribute(),
+				AbilitySystemComponent->GetNumericAttributeBase(UHeroCombatAttributeSet::GetMaxHealthAttribute()));
+			AbilitySystemComponent->SetNumericAttributeBase(
+				UHeroCombatAttributeSet::GetEnergyAttribute(),
+				AbilitySystemComponent->GetNumericAttributeBase(UHeroCombatAttributeSet::GetMaxEnergyAttribute()));
 		}
 	}
 }
@@ -319,6 +500,13 @@ bool AHeroCombatCharacter::FindRespawnTransform(FTransform& OutTransform) const
 
 void AHeroCombatCharacter::BasicAttackPressed()
 {
+	// 诊断：左键多入口（投掷确认/选目标/飞踢/普攻），一次按键走哪条全看这三个标签。
+	UE_LOG(LogTemp, Warning, TEXT("[DodgeKick] BasicAttackPressed 入口: Dodge.Active=%d Throw.Aiming=%d DH.Selecting=%d 权威=%d"),
+		(AbilitySystemComponent && AbilitySystemComponent->HasMatchingGameplayTag(LOLGameplayTags::State_Dodge_Active)) ? 1 : 0,
+		(AbilitySystemComponent && AbilitySystemComponent->HasMatchingGameplayTag(LOLGameplayTags::State_Throw_Aiming)) ? 1 : 0,
+		(AbilitySystemComponent && AbilitySystemComponent->HasMatchingGameplayTag(LOLGameplayTags::State_DeathHarvest_Selecting)) ? 1 : 0,
+		HasAuthority() ? 1 : 0);
+
 	// ① 瞄准态：左键语义 = 确认投掷，拦截，不普攻。
 	// 【这一段必须留在最前面】：投掷优先级高于普攻（含破隐强化普攻）。直接 return 掉，
 	// 下面的 RouteBasicAttackInput 不会跑 → GA_ThreeHitPassive 不激活 → 它起手时那段
@@ -339,6 +527,15 @@ void AHeroCombatCharacter::BasicAttackPressed()
 		AbilitySystemComponent->HasMatchingGameplayTag(LOLGameplayTags::State_DeathHarvest_Selecting))
 	{
 		RouteManualTargetConfirm();
+		return;
+	}
+
+	// ②½ 闪避派生窗口开着：左键语义 = JumpKick（GA_Dodge 接住），同样拦截，不普攻。
+	// 标签由 GA_Dodge 在闪避起手时挂上、窗口到期/踢出时摘掉（和上面两条同一个判据套路）。
+	if (AbilitySystemComponent &&
+		AbilitySystemComponent->HasMatchingGameplayTag(LOLGameplayTags::State_Dodge_Active))
+	{
+		RouteDodgeKickInput();
 		return;
 	}
 
@@ -385,28 +582,122 @@ void AHeroCombatCharacter::ServerSubmitThrowConfirmInput_Implementation()
 	RouteThrowConfirmInput();
 }
 
+void AHeroCombatCharacter::RouteDodgeKickInput()
+{
+	if (!AbilitySystemComponent)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[DodgeKick] RouteDodgeKickInput: ASC 为空，直接返回"));
+		return;
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[DodgeKick] RouteDodgeKickInput: 发 Event.Input.DodgeKick（权威=%d）"), HasAuthority() ? 1 : 0);
+
+	FGameplayEventData EventData;
+	EventData.EventTag = LOLGameplayTags::Event_Input_DodgeKick;
+	EventData.Instigator = this;
+	EventData.Target = this;
+	AbilitySystemComponent->HandleGameplayEvent(EventData.EventTag, &EventData);
+
+	// GameplayEvent 只在本地派发、不过网络。GA_Dodge 是 LocalPredicted：客户端那份实例在
+	// WaitGameplayEvent 等这个确认，服务端那份实例也要收到 —— 不镜像过去服务端永远不踢
+	// （和 RouteThrowConfirmInput → ServerSubmitThrowConfirmInput 是同一条链）。
+	if (!HasAuthority())
+	{
+		ServerSubmitDodgeKickInput();
+	}
+}
+
+void AHeroCombatCharacter::ServerSubmitDodgeKickInput_Implementation()
+{
+	// 服务端跑同一套本地路由：到这里 HasAuthority() 已为 true，不会再回发。
+	RouteDodgeKickInput();
+}
+
+bool AHeroCombatCharacter::TryRouteDodgeEvade()
+{
+	// 闪避窗口开着 → 空格语义 = 二段 evade（拦截跳跃）。
+	if (AbilitySystemComponent &&
+		AbilitySystemComponent->HasMatchingGameplayTag(LOLGameplayTags::State_Dodge_Active))
+	{
+		RouteDodgeEvadeInput();
+		return true;
+	}
+	return false;
+}
+
+void AHeroCombatCharacter::RouteDodgeEvadeInput()
+{
+	if (!AbilitySystemComponent) return;
+
+	FGameplayEventData EventData;
+	EventData.EventTag = LOLGameplayTags::Event_Input_DodgeEvade;
+	EventData.Instigator = this;
+	EventData.Target = this;
+	AbilitySystemComponent->HandleGameplayEvent(EventData.EventTag, &EventData);
+
+	// 和 RouteDodgeKickInput 同一条链：GameplayEvent 只在本地派发，服务端那份实例要靠镜像 RPC 收到。
+	if (!HasAuthority())
+	{
+		ServerSubmitDodgeEvadeInput();
+	}
+}
+
+void AHeroCombatCharacter::ServerSubmitDodgeEvadeInput_Implementation()
+{
+	RouteDodgeEvadeInput();
+}
+
 void AHeroCombatCharacter::RouteBasicAttackInput()
 {
 	UMyAbilitySystemComponent* ASC = Cast<UMyAbilitySystemComponent>(AbilitySystemComponent);
 	if (!ASC) { UE_LOG(LogTemp, Warning, TEXT("[Passive] RouteBasicAttackInput: ASC 为空")); return; }
 
-	// 普攻 → 激活「被动槽位」里的技能，同时发 GameplayEvent（被动靠它推进连段）。
-	// 直接用原生标签对象：CDO 构造阶段设的成员可能因蓝图覆盖/时序是 None，运行时用原生标签最稳。
-	const FGameplayTag PassiveTag = LOLGameplayTags::Ability_Slot_Passive;
-	const FGameplayTag AttackTag = LOLGameplayTags::Event_Input_BasicAttack;
+	// ---------------------------------------------------------------------
+	// 【左键路由】空中优先，其次按形态分家。
+	//
+	//   空中                      → Ability.Slot.AirAttack（一个能力，内部按形态选动画）
+	//   地面 + State.Form.Unarmed → Ability.Slot.Combo（空手四连拳）
+	//   地面 + 持刀              → Ability.Slot.Passive（持刀三连普攻，原有行为）
+	//
+	// 为什么分两个地面槽位而不是一个槽位装两个能力：SlotAbilityMap.Add 是【静默覆盖】，
+	// 后装配的会把先装配的顶掉 ⇒ 症状是「其中一种形态的左键完全没反应」。
+	//
+	// 标签一律用运行时从 CDO 取的原生对象：构造阶段设的成员可能因蓝图覆盖/时序是 None。
+	// ---------------------------------------------------------------------
+	const bool bAirborne = GetCharacterMovement() && GetCharacterMovement()->IsFalling();
+	const bool bUnarmed = ASC->HasMatchingGameplayTag(LOLGameplayTags::State_Form_Unarmed);
 
-	const FGameplayAbilitySpecHandle Handle = ASC->GetHandleForSlot(PassiveTag);
-	UE_LOG(LogTemp, Warning, TEXT("[Passive] 槽位[%s] 标签有效=%d Handle有效=%d"), *PassiveTag.ToString(), PassiveTag.IsValid(), Handle.IsValid());
+	const FGameplayTag SlotTag = bAirborne
+		? LOLGameplayTags::Ability_Slot_AirAttack
+		: (bUnarmed ? LOLGameplayTags::Ability_Slot_Combo : LOLGameplayTags::Ability_Slot_Passive);
+
+	const FGameplayAbilitySpecHandle Handle = ASC->GetHandleForSlot(SlotTag);
+	UE_LOG(LogTemp, Warning, TEXT("[Passive] 左键: 空中=%d 空手=%d → 槽位[%s] Handle有效=%d"),
+		bAirborne ? 1 : 0, bUnarmed ? 1 : 0, *SlotTag.ToString(), Handle.IsValid());
 	if (Handle.IsValid())
 	{
 		const bool bActivated = ASC->TryActivateAbility(Handle, true);
 		UE_LOG(LogTemp, Warning, TEXT("[Passive] TryActivateAbility 返回=%d"), bActivated);
 	}
 
-	FGameplayEventData EventData;
-	EventData.EventTag = AttackTag;
-	EventData.Instigator = this;
-	ASC->HandleGameplayEvent(AttackTag, &EventData);
+	// 连段推进事件【只发给地面】，而且【按形态发不同的标签】。
+	//   持刀：Event.Input.BasicAttack → 唤醒持刀三连普攻（Ability.Slot.Passive）
+	//   空手：Event.Input.ComboAttack → 唤醒空手四连拳（Ability.Slot.Combo）
+	// 两个能力都是 GA_ThreeHitPassive、都订阅输入事件推进连段，所以标签必须分开 ——
+	// 共用一个标签的话两个都装在角色上时一次按键会同时唤醒两个 ⇒ 一次打两段伤害。
+	// 空中不发：空中攻击是单段、不接段；而且发了的话正在连段中的连招会以为
+	// 「玩家又按了一下」而自己推进一段（症状：空中挥一拳，落地发现连招多打了一段）。
+	if (!bAirborne)
+	{
+		const FGameplayTag RouteTag = bUnarmed
+			? LOLGameplayTags::Event_Input_ComboAttack
+			: LOLGameplayTags::Event_Input_BasicAttack;
+
+		FGameplayEventData EventData;
+		EventData.EventTag = RouteTag;
+		EventData.Instigator = this;
+		ASC->HandleGameplayEvent(RouteTag, &EventData);
+	}
 }
 
 void AHeroCombatCharacter::AbilityInputTagPressed(FGameplayTag SlotTag)
@@ -461,6 +752,137 @@ void AHeroCombatCharacter::EndManualTargetSelect()
 	if (bWasSelecting && AbilitySystemComponent)
 	{
 		AbilitySystemComponent->RemoveLooseGameplayTag(LOLGameplayTags::State_DeathHarvest_Selecting);
+	}
+}
+
+FVector AHeroCombatCharacter::ResolveAimDirection(const AActor* Avatar, bool bIncludePitch)
+{
+	if (!Avatar)
+	{
+		return FVector::ForwardVector;
+	}
+
+	const APawn* Pawn = Cast<APawn>(Avatar);
+	if (!Pawn)
+	{
+		// 不是 Pawn 就没有控制旋转可用，朝向是唯一能给的答案。
+		return Avatar->GetActorForwardVector();
+	}
+
+	// APawn::GetControlRotation 在没控制器时返回 ActorRotation —— 正好是我们要的兜底，
+	// 所以这里不用自己判空。
+	FRotator AimRotation = Pawn->GetControlRotation();
+
+	// Roll 永远归零：它是相机侧倾，不是瞄准方向。
+	AimRotation.Roll = 0.f;
+	if (!bIncludePitch)
+	{
+		AimRotation.Pitch = 0.f;
+	}
+
+	return AimRotation.Vector();
+}
+
+EHitDirection AHeroCombatCharacter::ResolveHitDirection(const AActor* Victim, const FVector& SourceLocation)
+{
+	if (!Victim)
+	{
+		return EHitDirection::Front;
+	}
+
+	// 用 ActorForwardVector 而不是「瞄准方向」：受击/死亡动画是【角色身体】的动作，
+	// 做的时候就是按身体朝向摆的，换算基准只能是身体朝向。
+	// （对比 ResolveAimDirection —— 那个回答的是「玩家瞄哪」，是另一个问题。）
+	const FVector ToSource = SourceLocation - Victim->GetActorLocation();
+
+	// 只取水平面：从正上方砸下来的伤害算「正面」，不做上/下这一档（没有对应素材）。
+	// 顺带避免「贴脸时 Z 差把水平分量淹掉」—— 站在同一个点上的话长度趋近 0。
+	const FVector Local = Victim->GetActorTransform().InverseTransformVectorNoScale(
+		FVector(ToSource.X, ToSource.Y, 0.f));
+
+	if (Local.IsNearlyZero())
+	{
+		// 完全重合（伤害源就在自己身上，比如自己的 AOE）：算不出方向，退回正面。
+		return EHitDirection::Front;
+	}
+
+	// atan2 得到 [-180,180]：0° = 正前方，±90° = 右侧/左侧，±180° = 正后方。
+	const float AngleDeg = FMath::RadiansToDegrees(FMath::Atan2(Local.Y, Local.X));
+
+	if (AngleDeg >= -45.f && AngleDeg < 45.f)   return EHitDirection::Front;
+	if (AngleDeg >= 45.f && AngleDeg < 135.f)   return EHitDirection::Right;
+	if (AngleDeg >= -135.f && AngleDeg < -45.f) return EHitDirection::Left;
+	return EHitDirection::Back;
+}
+
+void AHeroCombatCharacter::CacheHitDirection(EHitDirection Direction)
+{
+	LastHitDirection = Direction;
+	bHasHitDirection = true;
+}
+
+UAnimMontage* AHeroCombatCharacter::ResolveHitReactMontage(EHitDirection Direction) const
+{
+	// 该方向没配就返回空 —— 不退回别的方向：拿正面动画去演背面挨打，
+	// 表现是「人朝错误的方向缩了一下」，比不播更别扭。
+	switch (Direction)
+	{
+	case EHitDirection::Back:  return HitReactBackMontage;
+	case EHitDirection::Left:  return HitReactLeftMontage;
+	case EHitDirection::Right: return HitReactRightMontage;
+	case EHitDirection::Front:
+	default:                   return HitReactFrontMontage;
+	}
+}
+
+UAnimMontage* AHeroCombatCharacter::ResolveDeathMontage(EHitDirection Direction) const
+{
+	// 死亡这边【要】退回：这个方向缺一条时，有 DeathMontage 就播它，
+	// 总比尸体原地站着不动强。两者都没配才返回空。
+	// （左右没有专门的素材，走的正是这条兜底 —— 见头文件那句。）
+	UAnimMontage* Picked = nullptr;
+	switch (Direction)
+	{
+	case EHitDirection::Back: Picked = DeathBackMontage; break;
+	case EHitDirection::Front:
+	default:                  Picked = DeathFrontMontage; break;
+	}
+	return Picked ? Picked : DeathMontage.Get();
+}
+
+void AHeroCombatCharacter::PlayHitReact(EHitDirection Direction)
+{
+	// ① 死了就别受击了：死亡蒙太奇同一帧就在播，抢过来会让尸体站起来。
+	if (IsDead())
+	{
+		return;
+	}
+
+	UAnimMontage* Montage = ResolveHitReactMontage(Direction);
+	if (!Montage)
+	{
+		return;
+	}
+
+	// ② 冷却中：连发伤害（多段/DoT）每一下都重播的话，动画会一直卡在第一帧。
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+	if (Now - LastHitReactTime < HitReactCooldown)
+	{
+		return;
+	}
+
+	// ③ 上一条受击还没播完 —— 同上的另一种表现（冷却配得很短时靠这道门兜底）。
+	if (UAnimInstance* AnimInstance = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr)
+	{
+		if (AnimInstance->Montage_IsPlaying(Montage))
+		{
+			return;
+		}
+	}
+
+	if (PlayAnimMontage(Montage) > 0.f)
+	{
+		LastHitReactTime = Now;
 	}
 }
 

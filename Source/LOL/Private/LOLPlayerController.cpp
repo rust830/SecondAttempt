@@ -3,9 +3,11 @@
 
 #include "LOLPlayerController.h"
 #include "LOLCharacter.h"
+#include "GAS/HeroAttributePanelConfig.h"
 #include "GAS/HeroHUDController.h"
 #include "GAS/HeroHUDSlotConfig.h"
 #include "GAS/InputConfig.h"
+#include "UI/HeroHUDWidget.h"
 #include "EnhancedInputSubsystems.h"
 #include "EnhancedInputComponent.h"
 #include "Engine/EngineTypes.h"
@@ -56,7 +58,10 @@ void ALOLPlayerController::CreateHUDForLocalPlayer()
 
 	// Outer 必须是这个 PC —— UHeroHUDController::ResolveSelfASC 是顺着 Outer 找 PlayerState 的。
 	HUDController = NewObject<UHeroHUDController>(this, TEXT("HeroHUDController"));
+	// 两份配置都要在 TryBindHUD 之前给：订阅哪些属性/标签就是照着它们来的，
+	// 晚于第一次绑定的话第一次绑定不会订阅，那部分 UI 会一直停在初始值。
 	HUDController->SetSlotConfig(HUDSlotConfig);
+	HUDController->SetAttributePanelConfig(AttributePanelConfig);
 
 	// 先绑、再建 Widget。
 	//
@@ -95,6 +100,14 @@ void ALOLPlayerController::AcknowledgePossession(APawn* P)
 	Super::AcknowledgePossession(P);
 
 	// 客户端路径。主机的 AcknowledgePossession 不触发 —— 主机靠 BeginPlay + Controller 的有界重试。
+	//
+	// 先补一次创建：CreateHUDForLocalPlayer 只有一个调用点（BeginPlay），而它的门是
+	// IsLocalPlayerController()。客户端上如果那一刻 LocalPlayer 还没挂到这个 PC 上，
+	// 门就是 false，而且【没有任何东西会重试】—— 症状是「客户端整局没有 HUD」且不报错。
+	// 这里本来就是客户端路径（AcknowledgePossession 只在客户端走），补一次零成本；
+	// 已经建过的话函数自己会早退。
+	CreateHUDForLocalPlayer();
+
 	NotifyHUDTryBind();
 }
 
@@ -180,6 +193,10 @@ void ALOLPlayerController::SetupInputComponent()
 
 			// Intentionally raw: this makes LMB available in the shipped ThirdPerson mapping immediately.
 			EnhancedInputComponent->BindAction(BasicAttackAction, ETriggerEvent::Started, this, &ALOLPlayerController::BasicAttackStarted);
+
+			// 属性面板开关（C）。Started 不用 Triggered —— 这是「按一下切一次」的开关，
+			// Triggered 在按住时会连续触发，面板会疯狂闪（同 AbilityInputStarted 那条注释）。
+			EnhancedInputComponent->BindAction(ToggleAttributePanelAction, ETriggerEvent::Started, this, &ALOLPlayerController::ToggleAttributePanelStarted);
 		}
 		else
 		{
@@ -237,6 +254,17 @@ void ALOLPlayerController::BasicAttackStarted()
 	if (ALOLCharacter* MyCharacter = GetPawn<ALOLCharacter>())
 	{
 		MyCharacter->BasicAttackPressed();
+	}
+}
+
+void ALOLPlayerController::ToggleAttributePanelStarted()
+{
+	// 走 HUD 根 Widget 的公开入口，而不是自己去摸那个面板子控件：
+	// 「按键 → 面板」这条线只有一处，而且面板是 WBP 里的可选绑定，
+	// 外面看不见它（BindWidgetOptional 是 protected）。
+	if (UHeroHUDWidget* HeroHUD = Cast<UHeroHUDWidget>(HUDWidget))
+	{
+		HeroHUD->ToggleAttributePanel();
 	}
 }
 

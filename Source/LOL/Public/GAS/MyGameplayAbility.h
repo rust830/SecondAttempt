@@ -31,9 +31,28 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cooldown", meta = (ClampMin = "0"))
 	float CooldownDuration = 0.0f;
 
-	/** Mana cost (reserved; hook up a resource attribute + cost GE to enable). */
+	/**
+	 * 能量消耗（扣 Energy）。0 = 免费（默认，行为和接上之前完全一致）。
+	 *
+	 * 【这条链怎么跑起来的】CommitAbility → CommitCheck → CheckCost（不够就直接失败、不进冷却）
+	 * → CommitExecute → ApplyCost（扣）。项目里所有技能都调了 CommitAbility，所以填个数就生效，
+	 * 不用在蓝图里再加节点。
+	 *
+	 * ⚠️ 没调 CommitAbility 的技能【不会】扣蓝：GA_DeathHarvest 在客户端那条分支是刻意不 Commit 的
+	 * （见它的注释：本端再挂一份冷却会导致 CD 比服务端长一个 RTT），那条路径上消耗也就跟着不扣 ——
+	 * 这是对的，真正施法是服务端那一次，扣一次就够。
+	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mana", meta = (ClampMin = "0"))
 	float ManaCost = 0.0f;
+
+	/**
+	 * 消耗 GE。默认 UGE_AbilityCost（扣 Energy，数值走 SetByCaller Data.Cost）。
+	 *
+	 * 留成可配是为了「消耗别的资源」的技能（比如耗血的技能）只换这一个 GE，
+	 * 不用再改能力基类。留空 = 这个技能不扣任何东西（即便 ManaCost > 0）。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Mana")
+	TSubclassOf<UGameplayEffect> CostGameplayEffect;
 
 	/** How this ability is triggered. The ASC's button routing only activates OnInputTriggered abilities. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Activation")
@@ -67,6 +86,23 @@ public:
 	FGameplayTag GetGameplayEventTriggerTag() const;
 
 	virtual void ApplyCooldown(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, const FGameplayAbilityActivationInfo ActivationInfo) const override;
+
+	/**
+	 * 消耗够不够。ManaCost 为 0 / 没配 CostGameplayEffect 时一律通过（默认免费）。
+	 *
+	 * 【为什么直接比 Energy >= ManaCost，而不是走引擎的 CanApplyAttributeModifiers】
+	 * 那条路会先把 Instant GE 的 modifier 全算一遍再判「有没有属性被钳到 0 以下」，
+	 * 中间还夹着 Period / Stacking 的处理 —— 对「扣一个固定数」这种最简单的消耗是绕远路，
+	 * 而且它对「刚好等于」的边界（Energy 正好 == Cost）判据不直观。
+	 * 直接读属性一眼能看懂，失败时也能打出「当前多少 / 需要多少」。
+	 */
+	virtual bool CheckCost(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, FGameplayTagContainer* OptionalRelevantTags = nullptr) const override;
+
+	/**
+	 * 真的扣。施加路径和 ApplyCooldown 完全一致（ApplyGameplayEffectSpecToOwner）：
+	 * 它内部按预测键决定是本地预测还是权威施加，客户端不用额外写代码。
+	 */
+	virtual void ApplyCost(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, const FGameplayAbilityActivationInfo ActivationInfo) const override;
 
 	/**
 	 * 给自己挂「强化普攻」状态（State.EmpoweredAttack），持续 Duration 秒。

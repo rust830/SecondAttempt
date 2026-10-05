@@ -3,13 +3,11 @@
 
 #include "GAS/MyAbilitySystemComponent.h"
 #include "GAS/MyGameplayAbility.h"
-#include "AbilitySystemBlueprintLibrary.h"
 #include "AbilitySystemInterface.h"      // FindAbilitySystemComponent 的接口查询
 #include "GameFramework/Pawn.h"           // 同上（② 那条 Pawn → PlayerState 的路）
 #include "GameFramework/PlayerState.h"    // 同上（Cast 到接口需要完整类型）
 #include "GAS/LOLGameplayTags.h"
 #include "GameplayEffect.h"
-#include "Engine/World.h"   // AbilityInputTagHeld 里的 GetWorld()->GetTimeSeconds()（unity 构建时被别的文件顺带 include 过）
 
 
 void UMyAbilitySystemComponent::AbilityInputTagPressed(const FGameplayTag& SlotTag)
@@ -19,7 +17,9 @@ void UMyAbilitySystemComponent::AbilityInputTagPressed(const FGameplayTag& SlotT
 	const FGameplayAbilitySpecHandle* Handle = SlotAbilityMap.Find(SlotTag);
 	if (!Handle)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[ThrowDagger] 槽位 %s 未授权（SlotAbilityMap 无此键）"), *SlotTag.ToString());
+		// Warning 而不是 Log：槽位没授权是【配置错】（AbilitySet 漏了 / 标签拼错），
+		// 不是正常流程，值得吵醒人。
+		UE_LOG(LogTemp, Warning, TEXT("[Ability] 槽位 %s 未授权（SlotAbilityMap 无此键）"), *SlotTag.ToString());
 		return;
 	}
 
@@ -33,13 +33,13 @@ void UMyAbilitySystemComponent::AbilityInputTagPressed(const FGameplayTag& SlotT
 		return;
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("[ThrowDagger] ASC 收到槽位输入: %s"), *SlotTag.ToString());
+	UE_LOG(LogTemp, Log, TEXT("[Ability] ASC 收到槽位输入: %s"), *SlotTag.ToString());
 
 	// 已激活（如投掷技能正在瞄准）→ 再次按下 = 广播「再按」事件，交给能力自己决定。
 	// 用 IsActive() 而不是 GetAbilityInstances().Num()：InstancedPerActor 的能力结束后实例仍留在数组里，Num() 会一直 >0。
 	if (Spec->IsActive())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[ThrowDagger] 槽位 %s 已激活 → 发再按事件"), *SlotTag.ToString());
+		UE_LOG(LogTemp, Log, TEXT("[Ability] 槽位 %s 已激活 → 发再按事件"), *SlotTag.ToString());
 		FGameplayEventData EventData;
 		EventData.EventTag = LOLGameplayTags::Event_Input_Repressed;
 		EventData.Instigator = GetOwnerActor();
@@ -52,9 +52,30 @@ void UMyAbilitySystemComponent::AbilityInputTagPressed(const FGameplayTag& SlotT
 	// 破隐：施放非隐身技能时，若正处于隐身则破隐（隐身技能自身 bBreaksStealthOnCast=false，不误破）。
 	BreakStealthForCast(Ability);
 
-	// 未激活 → 正常激活
-	UE_LOG(LogTemp, Warning, TEXT("[ThrowDagger] 槽位 %s 未激活 → TryActivateAbility"), *SlotTag.ToString());
-	TryActivateAbility(*Handle, true);
+	// 未激活 → 正常激活。结果也要打出来：TryActivateAbility 失败时 GAS 一声不吭 ——
+	//「冷却中」「被沉默/击退/眩晕控住」在日志里全是隐形的（只看得见按键，看不见没生效），
+	// 排查「按了没反应」时完全无从下手（比如连按 7 次槽位键却只有第一次动）。
+	// Log 而不是 Warning：冷却中 / 被沉默 / 被控时按一下是**正常操作**，
+	// 不是异常。但必须打 —— GAS 失败时一声不吭，排查「按了没反应」全靠这行。
+	const bool bActivated = TryActivateAbility(*Handle, true);
+	// 打上所有者：玩家和 Bot 走的是同一个入口，没有它就没法把日志里的技能释放
+	// 归属到任何一方 —— 而"Bot 到底在放什么"是调 AI 时第一个要问的问题。
+	UE_LOG(LogTemp, Log, TEXT("[Ability] %s 槽位 %s → TryActivateAbility 结果=%s"),
+		*GetNameSafe(GetOwnerActor()), *SlotTag.ToString(), bActivated ? TEXT("成功") : TEXT("失败"));
+
+	if (!bActivated)
+	{
+		// 失败原因：UGameplayAbility::CanActivateAbility 会把「为什么不行」写进 RelevantTags ——
+		// 冷却中是 Cooldown.<冷却标签>，被控是 State.XXX，没蓝是 Cost 相关标签。
+		// 注意这是 UGameplayAbility 上的方法（不是 ASC 上的），所以要先拿到实例；
+		// 还没实例化过（从没成功激活过）就退回 CDO —— 判据都读 CDO 上的标签/GE 类，CDO 一样准。
+		if (const UGameplayAbility* AbilityToCheck = Spec->GetPrimaryInstance() ? Spec->GetPrimaryInstance() : Spec->Ability.Get())
+		{
+			FGameplayTagContainer RelevantTags;
+			AbilityToCheck->CanActivateAbility(*Handle, AbilityActorInfo.Get(), nullptr, nullptr, &RelevantTags);
+			UE_LOG(LogTemp, Log, TEXT("[Ability]   被拒原因: %s"), *RelevantTags.ToStringSimple());
+		}
+	}
 }
 
 void UMyAbilitySystemComponent::ServerBreakStealth_Implementation()
@@ -223,67 +244,6 @@ int32 UMyAbilitySystemComponent::RemoveGrantedTagEffectsIncludingPredicted(const
 	return NumRemoved;
 }
 
-void UMyAbilitySystemComponent::AbilityInputTagHeld(const FGameplayTag& SlotTag)
-{
-		if (!SlotTag.IsValid()) return;
-
-		const FGameplayAbilitySpecHandle* Handle = SlotAbilityMap.Find(SlotTag);
-		if (!Handle) return;
-
-		FGameplayAbilitySpec* Spec = FindAbilitySpecFromHandle(*Handle);
-		if (!Spec || !Spec->Ability) return;
-
-		// ֱ��ʹ�� Spec->Ability�������Ǽ��ܵ� CDO
-		UGameplayAbility* AbilityCDO = Spec->Ability;
-		if (!AbilityCDO) return;
-
-		// ��鼼���Ƿ���� "������ס�ظ�����" �ı�ǩ
-		if (!AbilityCDO->GetAssetTags().HasTag(FGameplayTag::RequestGameplayTag(FName("Ability.Policy.RepeatOnHold"))))
-		{
-			return;
-		}
-
-		// �����߼�����ֹÿ֡������
-		static float LastHoldTime = 0.0f;
-		float CurrentTime = GetWorld()->GetTimeSeconds();
-		if ((CurrentTime - LastHoldTime) < MyLeastInterval) return;
-
-		if (TryActivateAbility(*Handle, true))
-		{
-			LastHoldTime = CurrentTime;
-		}
-}
-
-void UMyAbilitySystemComponent::AbilityInputTagReleased(const FGameplayTag& SlotTag)
-{
-	if (!SlotTag.IsValid()) return;
-
-	const FGameplayAbilitySpecHandle* Handle = SlotAbilityMap.Find(SlotTag);
-	if (!Handle) return;
-
-	FGameplayAbilitySpec* Spec = FindAbilitySpecFromHandle(*Handle);
-	if (!Spec) return;
-
-	// ��ȡ��ǰ����ļ���ʵ��
-	const TArray<UGameplayAbility*>& ActiveInstances = Spec->GetAbilityInstances();
-
-	if (ActiveInstances.Num() == 0)
-	{
-		return;
-	}
-
-	// ��ü��ܵ����м���ʵ�����͡������ͷš��¼�
-	FGameplayEventData EventData;
-	EventData.EventTag = FGameplayTag::RequestGameplayTag(FName("Event.Input.Released"));
-	EventData.Instigator = GetOwnerActor();
-	EventData.Target = GetOwnerActor();
-
-	for (UGameplayAbility* ActiveAbility : ActiveInstances)
-	{
-		UAbilitySystemBlueprintLibrary::SendGameplayEventToActor(GetOwnerActor(), EventData.EventTag, EventData);
-	}
-}
-
 FGameplayAbilitySpecHandle UMyAbilitySystemComponent::GetHandleForSlot(const FGameplayTag& SlotTag) const
 {
 	const FGameplayAbilitySpecHandle* Handle = SlotAbilityMap.Find(SlotTag);
@@ -310,10 +270,34 @@ void UMyAbilitySystemComponent::SetAbilityLevelForSlot(const FGameplayTag& SlotT
 void UMyAbilitySystemComponent::OnGiveAbility(FGameplayAbilitySpec& AbilitySpec)
 {
 	Super::OnGiveAbility(AbilitySpec);
-	UE_LOG(LogTemp, Warning, TEXT("[Passive] OnGiveAbility: %s (动态标签 %d 个)"), *GetNameSafe(AbilitySpec.Ability), AbilitySpec.GetDynamicSpecSourceTags().Num());
-	for (const FGameplayTag& Tag : AbilitySpec.GetDynamicSpecSourceTags()) {
-		UE_LOG(LogTemp, Warning, TEXT("[Passive]   标签: %s"), *Tag.ToString());
-		if (Tag.ToString().StartsWith(TEXT("Ability.Slot."))) {
+
+	// 动态标签是唯一来源：槽位标签写在 AbilitySet 授予时的 DynamicSpecSourceTags 上。
+	// 用 Log 而不是 Warning —— 每次授能力（开局 + 每个海克斯 + 每件装备）都会走这里，
+	// Warning 级别会在正常游戏流程里刷爆日志窗口。
+	UE_LOG(LogTemp, Log, TEXT("[GAS] OnGiveAbility: %s（动态标签 %d 个）"),
+		*GetNameSafe(AbilitySpec.Ability), AbilitySpec.GetDynamicSpecSourceTags().Num());
+
+	for (const FGameplayTag& Tag : AbilitySpec.GetDynamicSpecSourceTags())
+	{
+		// 层级匹配，不是字符串前缀比较（见 LOLGameplayTags.h 里 Ability_Slot_Root 的说明）。
+		if (Tag.MatchesTag(LOLGameplayTags::Ability_Slot_Root))
+		{
+			// 【槽位被顶掉的诊断】竞技场的海克斯会在运行时往同一个槽位上再授能力
+			//（两个海克斯都给 Hex1，或海克斯顶了英雄技能组）。
+			// SlotAbilityMap.Add 是静默覆盖 —— 被顶掉的那份 spec 还留在能力列表里、
+			// 从此再也按不出来。表现是「那个技能突然消失了」，事后没有任何日志能解释。
+			// 这里吵出来。同一帧先后授予是合法的（覆盖就是语义），所以只记不拦。
+			if (const FGameplayAbilitySpecHandle* Existing = SlotAbilityMap.Find(Tag))
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("[GAS] 槽位 %s 已有能力（句柄 %s），现在被 %s（句柄 %s）顶掉 —— 原来那个技能再也按不出来"),
+					*Tag.ToString(), *Existing->ToString(),
+					*GetNameSafe(AbilitySpec.Ability), *AbilitySpec.Handle.ToString());
+			}
+			else
+			{
+				UE_LOG(LogTemp, Log, TEXT("[GAS]   槽位 %s ← %s"), *Tag.ToString(), *GetNameSafe(AbilitySpec.Ability));
+			}
 			SlotAbilityMap.Add(Tag, AbilitySpec.Handle);
 			return;
 		}
@@ -322,8 +306,10 @@ void UMyAbilitySystemComponent::OnGiveAbility(FGameplayAbilitySpec& AbilitySpec)
 
 void UMyAbilitySystemComponent::OnRemoveAbility(FGameplayAbilitySpec& AbilitySpec)
 {
-	for (const FGameplayTag& Tag : AbilitySpec.GetDynamicSpecSourceTags()) {
-		if (Tag.ToString().StartsWith(TEXT("Ability.Slot."))) {
+	for (const FGameplayTag& Tag : AbilitySpec.GetDynamicSpecSourceTags())
+	{
+		if (Tag.MatchesTag(LOLGameplayTags::Ability_Slot_Root))
+		{
 			SlotAbilityMap.Remove(Tag);
 		}
 	}

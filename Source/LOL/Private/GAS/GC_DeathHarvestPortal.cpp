@@ -1,6 +1,7 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "GAS/GC_DeathHarvestPortal.h"
+#include "Audio/HeroAudioLibrary.h"
 #include "GAS/LOLGameplayTags.h"
 #include "Kismet/GameplayStatics.h"
 #include "Particles/ParticleSystem.h"
@@ -45,12 +46,10 @@ bool AGC_DeathHarvestPortal::OnActive_Implementation(AActor* MyTarget, const FGa
 			EAttachLocation::KeepRelativeOffset, /*bAutoDestroy=*/false);
 	}
 
-	if (OpenSound)
-	{
-		UGameplayStatics::PlaySoundAtLocation(this, OpenSound, Parameters.Location);
-	}
+	// 音效从事件表里取（Audio.DeathHarvest.PortalOpen），这一类身上不再留音效属性。
+	UHeroAudioLibrary::PlayAt(this, LOLGameplayTags::Audio_DeathHarvestPortalOpen, Parameters.Location);
 
-	return LoopComp != nullptr || OpenSound != nullptr;
+	return LoopComp != nullptr;
 }
 
 bool AGC_DeathHarvestPortal::WhileActive_Implementation(AActor* MyTarget, const FGameplayCueParameters& Parameters)
@@ -69,10 +68,7 @@ bool AGC_DeathHarvestPortal::OnRemove_Implementation(AActor* MyTarget, const FGa
 	{
 		UGameplayStatics::SpawnEmitterAtLocation(GetWorld(), CloseParticle, GetActorTransform());
 	}
-	if (CloseSound)
-	{
-		UGameplayStatics::PlaySoundAtLocation(this, CloseSound, GetActorLocation());
-	}
+	UHeroAudioLibrary::PlayAt(this, LOLGameplayTags::Audio_DeathHarvestPortalClose, GetActorLocation());
 
 	return true;
 }

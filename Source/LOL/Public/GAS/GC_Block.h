@@ -60,8 +60,6 @@ public:
 	FVector ShieldScale = FVector(1.f, 1.f, 1.f);
 
 	/** 格挡成功那一刻的音效（可空）。Paragon: Kallari_Effort_Block。 */
-	UPROPERTY(EditDefaultsOnly, Category = "Block|Visual")
-	TObjectPtr<USoundBase> BlockSound;
 
 protected:
 	/** 兜底：角色被销毁 / 切关卡时 OnRemove 不一定走到，别把组件留在世界里。 */

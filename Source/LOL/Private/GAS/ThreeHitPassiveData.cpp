@@ -1,5 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #include "GAS/ThreeHitPassiveData.h"
+#include "GAS/GE_KnockbackImpulse.h"
 #include "Sound/SoundBase.h"
 #include "UObject/SoftObjectPath.h"
 
@@ -13,12 +14,9 @@ UThreeHitPassiveData::UThreeHitPassiveData()
 	// 想要别的在编辑器里覆盖掉即可（软引用，默认值只是路径）。
 	// 新加的属性会自动从 CDO 取这些默认值 —— 已经存在的 DS_Passive 里没有它们的序列化数据，
 	// 加载时保持构造函数里的值，不用手动回填。
-	PerfectWindowSuccessSound = TSoftObjectPtr<USoundBase>(
-		FSoftObjectPath(TEXT("/Game/ParagonKallari/Audio/Cues/Kallari_Ability_ScoredCrit.Kallari_Ability_ScoredCrit")));
-	AttackSound = TSoftObjectPtr<USoundBase>(
-		FSoftObjectPath(TEXT("/Game/ParagonKallari/Audio/Cues/Kallari_Effort_Swing.Kallari_Effort_Swing")));
-	EmpoweredAttackSound = TSoftObjectPtr<USoundBase>(
-		FSoftObjectPath(TEXT("/Game/ParagonKallari/Audio/Cues/Kallari_Effort_Ability_Primary_Strike.Kallari_Effort_Ability_Primary_Strike")));
+	// 新资产默认就带上纯冲量击退：空手四连拳这类「每一击都带位移」的连段本来就该推人，
+	// 而 HitImpulse 默认 0 让它对老资产（持刀三连击）完全无感 —— 挂了 GE 也不会推。
+	HitImpulseGE = UGE_KnockbackImpulse::StaticClass();
 
 	Stages.SetNum(3);
 	Stages[0].DamageMultiplier = 1.f; Stages[1].DamageMultiplier = 1.05f; Stages[2].DamageMultiplier = 1.10f;

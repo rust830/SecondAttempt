@@ -67,7 +67,6 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category="Spin") FRotator ParticleRotationRight = FRotator::ZeroRotator;
 
 	/** 起转的龙吼/音效（可空）。 */
-	UPROPERTY(EditDefaultsOnly, Category="Spin") TObjectPtr<USoundBase> SpinSound;
 
 private:
 	/** 两只手各一份（找不到插槽的那一侧不生成）。 */

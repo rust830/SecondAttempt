@@ -1,11 +1,11 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "GAS/GC_DeathHarvestBurst.h"
+#include "Audio/HeroAudioLibrary.h"
+#include "GAS/CueCameraShake.h"
 #include "GAS/LOLGameplayTags.h"
 #include "Camera/CameraShakeBase.h"
 #include "Engine/World.h"
-#include "GameFramework/Pawn.h"
-#include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "Particles/ParticleSystem.h"
 #include "Sound/SoundBase.h"
@@ -23,41 +23,23 @@ bool UGC_DeathHarvestBurst::OnExecute_Implementation(AActor* MyTarget, const FGa
 	const FRotator Rotation = Parameters.Normal.IsNearlyZero() ? FRotator::ZeroRotator : Parameters.Normal.Rotation();
 	const FVector Location = Parameters.Location + LocationOffset;
 
-	// 音效先取：粒子没配但音效配了，这一下也不算"没有表现"。
+	// 音效走事件表（Audio.DeathHarvest.Burst），这一类的表现不往 GC 上塞音效属性 ——
+	// 见 UHeroAudioConfig 的注释。
 	UParticleSystem* FX = Particle.LoadSynchronous();
-	USoundBase* SoundAsset = Sound.LoadSynchronous();
 
 	if (FX)
 	{
 		UGameplayStatics::SpawnEmitterAtLocation(World, FX, FTransform(Rotation, Location));
 	}
-	if (SoundAsset)
-	{
-		UGameplayStatics::PlaySoundAtLocation(World, SoundAsset, Location);
-	}
+	UHeroAudioLibrary::PlayAt(World, LOLGameplayTags::Audio_DeathHarvestBurst, Location);
 
-	bool bShaken = false;
-	if (CameraShake)
-	{
-		// ★ 用 MyTarget 判"是不是施法者本机"，不是 Parameters.Instigator：
-		//   cue 的 MyTarget 就是这条 cue 那个 ASC 的 avatar（AbilitySystemComponent.cpp:1507-1511
-		//   InvokeGameplayCueEvent 里取 AbilityActorInfo->AvatarActor），而多播 RPC 是在
-		//   【施法者的 ASC】上跑的（GameplayCueManager::FlushPendingCues → Call_InvokeGameplayCueExecuted_WithParams），
-		//   所以每一台机器上 MyTarget 都是施法者本人 —— 不依赖参数里那些 weak ptr 的复制。
-		APawn* CasterPawn = Cast<APawn>(MyTarget);
-		if (CasterPawn && CasterPawn->IsLocallyControlled())
-		{
-			if (APlayerController* PC = Cast<APlayerController>(CasterPawn->GetController()))
-			{
-				PC->ClientStartCameraShake(CameraShake);
-				bShaken = true;
-			}
-		}
-	}
+	// ★ 用 MyTarget 判"是不是施法者本机"，不是 Parameters.Instigator —— 理由见
+	//   CueCameraShake.h。死亡收割的三个 burst（Appear / Hit / TeleportOut）都用这一份实现。
+	const bool bShaken = HeroCueCameraShake::PlayLocalHitShake(MyTarget, CameraShake);
 
 	// 三个都留空 = 这次没有表现，返回 false（不是错误，只是没东西可播）。
 	// 注意这个返回值不影响任何逻辑：UGA_DeathHarvest 不看它。
-	return FX != nullptr || SoundAsset != nullptr || bShaken;
+	return FX != nullptr || bShaken;
 }
 
 // --- 三个子类：只有标签不同 ---

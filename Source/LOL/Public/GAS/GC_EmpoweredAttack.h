@@ -8,6 +8,7 @@
 
 class UAnimInstance;
 class UAnimMontage;
+class UNiagaraSystem;
 class UParticleSystem;
 class USceneComponent;
 class USoundBase;
@@ -61,12 +62,8 @@ public:
 	float MontageStopBlendOut = 0.25f;
 
 	/** 挂上强化状态时的一次性音效（可空）。 */
-	UPROPERTY(EditDefaultsOnly, Category = "EmpoweredAttack")
-	TObjectPtr<USoundBase> EnterSound;
 
 	/** 状态被消耗 / 到期时的一次性音效（可空）。 */
-	UPROPERTY(EditDefaultsOnly, Category = "EmpoweredAttack")
-	TObjectPtr<USoundBase> ExitSound;
 
 
 	/** 挂上强化状态时，在两把刀根上各放一份的一次性 Cascade（可空）。 */
@@ -101,6 +98,38 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "EmpoweredAttack|VFX")
 	FVector ParticleScale = FVector(1.f);
 
+	// ---------------------------------------------------------------------
+	// 空手形态（State.Form.Unarmed）专用配置。
+	//
+	// 【为什么需要】ExitParticle（P_ShadowPlane_Bonus_Damage_End）挂在 sword_base_* 上 ——
+	// 空手时剑只是收在背上、插槽照样存在 ⇒ 破隐强化状态结束那一下会在【收起的剑】上
+	// 炸一朵剑气，看起来就是"sword 的特效残留"。
+	// 空手时改挂拳头插槽 + 用空手自己的粒子（不配 Unarmed 粒子 = 空手完全不出这类粒子）。
+	// ---------------------------------------------------------------------
+
+	/** 空手形态 enter/exit 粒子挂的插槽（双拳）。插槽不存在时该侧跳过（同 sword 侧的纪律）。 */
+	UPROPERTY(EditDefaultsOnly, Category = "EmpoweredAttack|VFX|Unarmed")
+	FName UnarmedSocketLeft = TEXT("hand_l");
+
+	UPROPERTY(EditDefaultsOnly, Category = "EmpoweredAttack|VFX|Unarmed")
+	FName UnarmedSocketRight = TEXT("hand_r");
+
+	/**
+	 * 空手形态挂上强化状态时的一次性 Niagara（可空 = 不出粒子）。
+	 * 【为什么是 Niagara 不是 Cascade】空手特效是新做的，直接走 Niagara 管线
+	 * （Python 可程序化构建、调试器友好），不再复制 Paragon 的 Cascade 老路。
+	 */
+	UPROPERTY(EditDefaultsOnly, Category = "EmpoweredAttack|VFX|Unarmed")
+	TObjectPtr<UNiagaraSystem> UnarmedEnterParticle;
+
+	/** 空手形态强化被消耗 / 到期时的一次性 Niagara（可空 = 不出粒子）。 */
+	UPROPERTY(EditDefaultsOnly, Category = "EmpoweredAttack|VFX|Unarmed")
+	TObjectPtr<UNiagaraSystem> UnarmedExitParticle;
+
+	/** 空手粒子相对插槽的朝向（双拳共用一份，拳一般不需要镜像补偿）。 */
+	UPROPERTY(EditDefaultsOnly, Category = "EmpoweredAttack|VFX|Unarmed")
+	FRotator UnarmedParticleRotation = FRotator::ZeroRotator;
+
 private:
 	/** 取目标角色的 AnimInstance（不是 Character / 没有 mesh 时返回 null）。 */
 	UAnimInstance* GetTargetAnimInstance(AActor* Target) const;
@@ -112,13 +141,23 @@ private:
 	void StopEmpowerMontage(AActor* Target);
 
 	/** 在目标位置播一个一次性音效（可空，静默跳过）。 */
-	void PlaySoundAt(AActor* Target, USoundBase* Sound) const;
 
 	/** 粒子统一挂在角色网格上跟着身体走；没有网格就退回 root。 */
 	USceneComponent* ResolveAttachComponent(AActor* Target) const;
 
-	/** 在 SwordSocketLeft / SwordSocketRight 上各放一份一次性 Cascade（可空，静默跳过；播完自毁）。 */
-	void SpawnSwordParticles(AActor* Target, UParticleSystem* Particle) const;
+	/**
+	 * 目标当前是不是空手形态（读 ASC 上的 State.Form.Unarmed，GA_FormSwitch 切的 GE 授的标签）。
+	 * 没有 ASC / 查不到标签 = 不是空手（持刀是默认形态）。
+	 */
+	bool IsTargetUnarmed(AActor* Target) const;
+
+	/**
+	 * 按形态选好插槽后各放一份一次性粒子（可空，静默跳过；播完自毁）。
+	 * 空手 → UnarmedSocketLeft/Right（双拳）+ UnarmedEnter/ExitParticle（Niagara）；
+	 * 持刀 → SwordSocketLeft/Right（双刀）+ Enter/ExitParticle（Cascade）。
+	 * 两个指针传其一（或都空 = 不出粒子）。
+	 */
+	void SpawnFormParticles(AActor* Target, UParticleSystem* Cascade, UNiagaraSystem* NiagaraIn) const;
 
 	/** 「Montage 没配」的警告只打一次，避免反复挂状态刷屏。 */
 	bool bLoggedMissingMontage = false;

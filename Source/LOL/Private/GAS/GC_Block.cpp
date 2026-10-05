@@ -1,6 +1,7 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "GAS/GC_Block.h"
+#include "Audio/HeroAudioLibrary.h"
 #include "GAS/LOLGameplayTags.h"
 #include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -47,10 +48,8 @@ bool AGC_Block::OnActive_Implementation(AActor* MyTarget, const FGameplayCuePara
 		LogShieldDiagnostic();
 	}
 
-	if (BlockSound)
-	{
-		UGameplayStatics::PlaySoundAtLocation(this, BlockSound, MyTarget->GetActorLocation());
-	}
+	// 音效从事件表里取（Audio.Block），这一类身上不再留音效属性。
+	UHeroAudioLibrary::PlayAt(this, LOLGameplayTags::Audio_Block, MyTarget->GetActorLocation());
 
 	return true;
 }

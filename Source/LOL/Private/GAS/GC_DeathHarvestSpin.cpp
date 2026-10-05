@@ -1,6 +1,7 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "GAS/GC_DeathHarvestSpin.h"
+#include "Audio/HeroAudioLibrary.h"
 #include "GAS/LOLGameplayTags.h"
 #include "Components/SceneComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -75,10 +76,8 @@ bool AGC_DeathHarvestSpin::OnActive_Implementation(AActor* MyTarget, const FGame
 		}
 	}
 
-	if (SpinSound)
-	{
-		UGameplayStatics::PlaySoundAtLocation(this, SpinSound, MyTarget->GetActorLocation());
-	}
+	// 音效从事件表里取（Audio.DeathHarvest.Spin），这一类身上不再留音效属性。
+	UHeroAudioLibrary::PlayAt(this, LOLGameplayTags::Audio_DeathHarvestSpin, MyTarget->GetActorLocation());
 
 	return LoopComps.Num() > 0;
 }

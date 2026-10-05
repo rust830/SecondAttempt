@@ -37,12 +37,6 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Aiming")
 	FName AttachSocketName = FName("dagger_a_r");
 
-	/**
-	 * 进瞄准态时的一次性音效（可空）。默认 Kallari_Effort_Ability_E_Raise。
-	 * 和轮廓一样只给本地控制端：这是「我在瞄准」的操作反馈。
-	 */
-	UPROPERTY(EditDefaultsOnly, Category = "Aiming")
-	TSoftObjectPtr<USoundBase> AimingSound;
 
 private:
 	/** 本 cue 生成的轮廓组件，OnRemove 里销毁。 */

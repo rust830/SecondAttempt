@@ -1,13 +1,18 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "GAS/GC_EmpoweredAttack.h"
+#include "AbilitySystemComponent.h"
+#include "AbilitySystemBlueprintLibrary.h"
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimMontage.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/EngineTypes.h"
 #include "Engine/World.h"
+#include "Audio/HeroAudioLibrary.h"
 #include "GAS/LOLGameplayTags.h"
 #include "GameFramework/Character.h"
+#include "NiagaraSystem.h"
+#include "NiagaraFunctionLibrary.h"
 #include "GameplayEffectTypes.h"
 #include "Kismet/GameplayStatics.h"
 #include "Particles/ParticleSystem.h"
@@ -37,8 +42,10 @@ bool AGC_EmpoweredAttack::OnActive_Implementation(AActor* MyTarget, const FGamep
 	}
 
 	PlayEmpowerMontage(MyTarget);
-	SpawnSwordParticles(MyTarget, EnterParticle);
-	PlaySoundAt(MyTarget, EnterSound);
+	SpawnFormParticles(MyTarget,
+		IsTargetUnarmed(MyTarget) ? nullptr : EnterParticle,
+		IsTargetUnarmed(MyTarget) ? UnarmedEnterParticle : nullptr);
+	UHeroAudioLibrary::PlayAt(MyTarget, LOLGameplayTags::Audio_EmpoweredAttackEnter, MyTarget->GetActorLocation());
 
 	// 永远返回 true：素材没配只是「没表现」，不是失败。
 	// 返回 false 会被当成 cue 挂载失败，actor 当场销毁，OnRemove 就没机会收尾了。
@@ -50,8 +57,10 @@ bool AGC_EmpoweredAttack::OnRemove_Implementation(AActor* MyTarget, const FGamep
 	// 命中消耗掉 / 窗口自然到期都会走到这里。MyTarget 可能已经失效（角色被销毁），
 	// 但 StopEmpowerMontage / PlaySoundAt 都对 null 免疫，这里不用额外判空。
 	StopEmpowerMontage(MyTarget);
-	SpawnSwordParticles(MyTarget, ExitParticle);
-	PlaySoundAt(MyTarget, ExitSound);
+	SpawnFormParticles(MyTarget,
+		IsTargetUnarmed(MyTarget) ? nullptr : ExitParticle,
+		IsTargetUnarmed(MyTarget) ? UnarmedExitParticle : nullptr);
+	UHeroAudioLibrary::PlayAt(MyTarget, LOLGameplayTags::Audio_EmpoweredAttackExit, MyTarget->GetActorLocation());
 
 	return true;
 }
@@ -102,17 +111,6 @@ void AGC_EmpoweredAttack::StopEmpowerMontage(AActor* Target)
 	}
 }
 
-void AGC_EmpoweredAttack::PlaySoundAt(AActor* Target, USoundBase* Sound) const
-{
-	if (!Sound || !IsValid(Target))
-	{
-		return;
-	}
-
-	// 和 GC_Stealth 一致：摆在世界里的位置音（不是只给本人听的 2D 音）。
-	UGameplayStatics::PlaySoundAtLocation(Target->GetWorld(), Sound, Target->GetActorLocation());
-}
-
 USceneComponent* AGC_EmpoweredAttack::ResolveAttachComponent(AActor* Target) const
 {
 	if (!IsValid(Target))
@@ -132,9 +130,17 @@ USceneComponent* AGC_EmpoweredAttack::ResolveAttachComponent(AActor* Target) con
 	return Target->GetRootComponent();
 }
 
-void AGC_EmpoweredAttack::SpawnSwordParticles(AActor* Target, UParticleSystem* Particle) const
+bool AGC_EmpoweredAttack::IsTargetUnarmed(AActor* Target) const
 {
-	if (!Particle || !IsValid(Target))
+	// 判据和 GA_AirAttack 一致：读 State.Form.Unarmed（GA_FormSwitch 切的 GE 授的标签）。
+	// cue 在每个客户端各跑一遍，标签是复制的，两端读到的形态一致。
+	const UAbilitySystemComponent* ASC = UAbilitySystemBlueprintLibrary::GetAbilitySystemComponent(Target);
+	return ASC && ASC->HasMatchingGameplayTag(LOLGameplayTags::State_Form_Unarmed);
+}
+
+void AGC_EmpoweredAttack::SpawnFormParticles(AActor* Target, UParticleSystem* Cascade, UNiagaraSystem* NiagaraIn) const
+{
+	if ((!Cascade && !NiagaraIn) || !IsValid(Target))
 	{
 		return;
 	}
@@ -145,34 +151,46 @@ void AGC_EmpoweredAttack::SpawnSwordParticles(AActor* Target, UParticleSystem* P
 		return;
 	}
 
-	// 左右各一份：右手插槽是镜像的，朝向要能单独补，不然同一个粒子挂上去会翻面（朝刀背而不是刀刃）。
-	struct FSwordSide
+	// 左右各一份：右手插槽是镜像的，朝向要能单独补，不然同一个粒子挂上去会翻面。
+	// 空手用双拳插槽（拳一般不需要镜像补偿，共用 UnarmedParticleRotation）。
+	struct FSide
 	{
 		FName Socket;
 		FRotator Rotation;
 	};
-	const FSwordSide Sides[2] =
+	const bool bUnarmed = IsTargetUnarmed(Target);
+	const FSide Sides[2] =
 	{
-		{ SwordSocketLeft,  ParticleRotationLeft },
-		{ SwordSocketRight, ParticleRotationRight },
+		{ bUnarmed ? UnarmedSocketLeft  : SwordSocketLeft,  bUnarmed ? UnarmedParticleRotation : ParticleRotationLeft },
+		{ bUnarmed ? UnarmedSocketRight : SwordSocketRight, bUnarmed ? UnarmedParticleRotation : ParticleRotationRight },
 	};
 
 	// 插槽不存在时 SpawnEmitterAttached 照样返回有效组件，只是把粒子挂在组件原点上 ——
 	// 表现为「粒子从角色脚下冒出来」，看不出是名字写错了（同 GC_Stealth::SpawnSwordParticles）。
 	const USkeletalMeshComponent* Mesh = Cast<USkeletalMeshComponent>(AttachTo);
-	for (const FSwordSide& Side : Sides)
+	for (const FSide& Side : Sides)
 	{
 		if (Mesh && !(Mesh->DoesSocketExist(Side.Socket) || Mesh->GetBoneIndex(Side.Socket) != INDEX_NONE))
 		{
-			UE_LOG(LogTemp, Warning, TEXT("[EmpoweredAttack] 刀上粒子：%s 上找不到插槽 %s → 这一侧不生成"),
+			UE_LOG(LogTemp, Warning, TEXT("[EmpoweredAttack] 粒子插槽：%s 上找不到插槽 %s → 这一侧不生成"),
 				*GetNameSafe(Mesh->GetSkeletalMeshAsset()), *Side.Socket.ToString());
 			continue;
 		}
 
 		// bAutoDestroy=true：这是挂上/收掉那一下的一次性 burst，播完自己销毁，
 		// 不像 GC_Stealth 的刀根粒子那样要跨整段隐身、得自己记账收尾。
-		UGameplayStatics::SpawnEmitterAttached(Particle, AttachTo, Side.Socket,
-			FVector::ZeroVector, Side.Rotation, ParticleScale,
-			EAttachLocation::SnapToTarget, /*bAutoDestroy=*/true);
+		if (Cascade)
+		{
+			UGameplayStatics::SpawnEmitterAttached(Cascade, AttachTo, Side.Socket,
+				FVector::ZeroVector, Side.Rotation, ParticleScale,
+				EAttachLocation::SnapToTarget, /*bAutoDestroy=*/true);
+		}
+		else if (NiagaraIn)
+		{
+			UNiagaraFunctionLibrary::SpawnSystemAttached(NiagaraIn, AttachTo, Side.Socket,
+				FVector::ZeroVector, Side.Rotation, ParticleScale,
+				EAttachLocation::SnapToTarget, /*bAutoDestroy=*/true,
+				ENCPoolMethod::None, /*bAutoActivate=*/true, /*bPreCullCheck=*/false);
+		}
 	}
 }

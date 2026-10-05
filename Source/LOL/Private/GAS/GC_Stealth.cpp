@@ -1,7 +1,9 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "GAS/GC_Stealth.h"
+#include "Audio/HeroAudioLibrary.h"
 #include "GAS/LOLGameplayTags.h"
+#include "GAS/LocalPlayerUtils.h"
 #include "GAS/MyStealthCameraModifier.h"
 #include "AbilitySystemBlueprintLibrary.h"
 #include "AbilitySystemComponent.h"
@@ -11,18 +13,23 @@
 #include "Components/PrimitiveComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/EngineTypes.h"
+#include "Engine/SkeletalMesh.h"   // GetNameSafe(Mesh->GetSkeletalMeshAsset())：SkeletalMeshComponent.h 只前置声明 USkeletalMesh
 #include "Engine/World.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "GameplayEffectTypes.h"
 #include "Kismet/GameplayStatics.h"
+#include "NiagaraComponent.h"
+#include "NiagaraFunctionLibrary.h"
+#include "NiagaraSystem.h"
 #include "MaterialDomain.h"
 #include "MaterialShared.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInterface.h"
 #include "Particles/ParticleSystem.h"
 #include "Particles/ParticleSystemComponent.h"
+#include "TimerManager.h"
 #include "RenderUtils.h"
 #include "Sound/SoundBase.h"
 
@@ -57,7 +64,7 @@ bool AGC_Stealth::OnActive_Implementation(AActor* MyTarget, const FGameplayCuePa
 	// 进入/破隐的一次性 burst 放在世界里（不设 OnlyOwnerSee），所以敌人也看得到「凭空消失/现身」的一下，
 	// 和 LoL 的隐身入场反馈一致；持续期间的循环粒子才只给主人看（见下）。
 	SpawnOneShotParticle(MyTarget, EnterParticle);
-	SpawnSound(MyTarget, EnterSound);
+	UHeroAudioLibrary::PlayAt(MyTarget, LOLGameplayTags::Audio_StealthEnter, MyTarget->GetActorLocation());
 
 	if (LoopParticle)
 	{
@@ -89,16 +96,19 @@ bool AGC_Stealth::OnActive_Implementation(AActor* MyTarget, const FGameplayCuePa
 	// 刀根粒子和倒计时光环都生成在 ApplyMeshVisuals 之后，躲不掉那轮「所有 primitive 设成
 	// OnlyOwnerSee」——两个 Spawn 里各自显式补一次，理由和上面的 LoopParticle 一样。
 	USceneComponent* const AttachTo = ResolveAttachComponent(MyTarget);
-	SpawnSwordParticles(AttachTo);
+	SpawnSwordParticles(MyTarget, AttachTo);
+	SpawnUnarmedCharge(MyTarget, AttachTo);
 	SpawnCountdown(AttachTo);
 
 	// 屏幕效果只给本人：这个 cue 在每个客户端都会跑一次，但只有隐身者自己的机器该变屏幕。
-	if (const APawn* Pawn = Cast<APawn>(MyTarget))
+	//
+	// ★ 必须问「是不是本地玩家本人」，不能用 Pawn->IsLocallyControlled()：
+	//   后者在 NM_Standalone 下对【所有】Controller（含 AI）都返回 true，
+	//   于是单机打 AI 时「敌人隐身」会被当成「我隐身」，全屏框和潜行滤镜跑到玩家视角上。
+	//   详见 GAS/LocalPlayerUtils.h。
+	if (LOLLocalPlayer::IsLocalPlayerControlled(MyTarget))
 	{
-		if (Pawn->IsLocallyControlled())
-		{
-			ApplyLocalScreen(MyTarget, /*bOn=*/true);
-		}
+		ApplyLocalScreen(MyTarget, /*bOn=*/true);
 	}
 
 	return true;
@@ -112,11 +122,12 @@ bool AGC_Stealth::OnRemove_Implementation(AActor* MyTarget, const FGameplayCuePa
 		// 破隐的 burst 全端可见（人已经重新露面了，没有藏的必要）。
 		ApplyMeshVisuals(MyTarget, /*bStealth=*/false);
 		SpawnOneShotParticle(MyTarget, ExitParticle);
-		SpawnSound(MyTarget, ExitSound);
+		UHeroAudioLibrary::PlayAt(MyTarget, LOLGameplayTags::Audio_StealthExit, MyTarget->GetActorLocation());
 	}
 
 	DestroyLoopParticle();
 	DestroySwordParticles();
+	DestroyUnarmedCharge();
 	DestroyCountdown();
 	StealthTarget = nullptr;
 
@@ -139,9 +150,10 @@ void AGC_Stealth::Tick(float DeltaSeconds)
 
 void AGC_Stealth::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	// 角色被销毁 / 切关卡时 OnRemove 不一定走到，循环粒子、刀根粒子、光环和屏幕效果都不能留下。
+	// 角色被销毁 / 切关卡时 OnRemove 不一定走到，循环粒子、刀根粒子、双手充能、光环和屏幕效果都不能留下。
 	DestroyLoopParticle();
 	DestroySwordParticles();
+	DestroyUnarmedCharge();
 	DestroyCountdown();
 	ApplyLocalScreen(nullptr, /*bOn=*/false);
 	Super::EndPlay(EndPlayReason);
@@ -264,16 +276,6 @@ void AGC_Stealth::SpawnOneShotParticle(AActor* Target, UParticleSystem* Particle
 		FTransform(Target->GetActorRotation(), Target->GetActorLocation()));
 }
 
-void AGC_Stealth::SpawnSound(AActor* Target, USoundBase* Sound) const
-{
-	if (!Sound || !IsValid(Target))
-	{
-		return;
-	}
-
-	UGameplayStatics::PlaySoundAtLocation(Target->GetWorld(), Sound, Target->GetActorLocation());
-}
-
 void AGC_Stealth::DestroyLoopParticle()
 {
 	if (LoopParticleComp)
@@ -303,12 +305,18 @@ USceneComponent* AGC_Stealth::ResolveAttachComponent(AActor* Target) const
 	return Target->GetRootComponent();
 }
 
-void AGC_Stealth::SpawnSwordParticles(USceneComponent* AttachTo)
+void AGC_Stealth::SpawnSwordParticles(AActor* Target, USceneComponent* AttachTo)
 {
 	// 预测重放 / 连续隐身时 OnActive 可能被调第二次，先清旧的，避免挂两层（和 LoopParticle 一样）。
 	DestroySwordParticles();
 
 	if (!SwordParticle || !AttachTo)
+	{
+		return;
+	}
+
+	// 空手时刀已收鞘，刀根粒子必须停发——否则出现「没有刀却有刀光」的残留（本 bug 根因）。
+	if (bSwordParticleRequiresArmed && IsTargetUnarmed(Target))
 	{
 		return;
 	}
@@ -352,6 +360,14 @@ void AGC_Stealth::SpawnSwordParticles(USceneComponent* AttachTo)
 	}
 }
 
+bool AGC_Stealth::IsTargetUnarmed(AActor* Target) const
+{
+	// 判据与 GC_EmpoweredAttack::IsTargetUnarmed 一致：读 State.Form.Unarmed（GA_FormSwitch 切的 GE 授的标签）。
+	// cue 在每个客户端各跑一遍，标签是复制的，两端读到的形态一致。
+	const UAbilitySystemComponent* ASC = UAbilitySystemBlueprintLibrary::GetAbilitySystemComponent(Target);
+	return ASC && ASC->HasMatchingGameplayTag(LOLGameplayTags::State_Form_Unarmed);
+}
+
 void AGC_Stealth::DestroySwordParticles()
 {
 	for (TObjectPtr<UParticleSystemComponent>& Comp : SwordParticleComps)
@@ -362,6 +378,90 @@ void AGC_Stealth::DestroySwordParticles()
 		}
 	}
 	SwordParticleComps.Reset();
+}
+
+void AGC_Stealth::SpawnUnarmedCharge(AActor* Target, USceneComponent* AttachTo)
+{
+	// 预测重放 / 连续隐身：先清旧的再挂新的，避免手上叠两层火。
+	DestroyUnarmedCharge();
+
+	UNiagaraSystem* System = UnarmedChargeSystem.LoadSynchronous();
+	if (!System || !AttachTo)
+	{
+		return;
+	}
+
+	// 只给空手形态挂：持刀时手上已经有刀光（SwordParticle 那条路径），
+	// 两边都挂就变成「刀上有光、拳上也有光」。
+	if (!IsTargetUnarmed(Target))
+	{
+		return;
+	}
+
+	const USkeletalMeshComponent* Mesh = Cast<USkeletalMeshComponent>(AttachTo);
+	const FName Sockets[2] = { UnarmedSocketLeft, UnarmedSocketRight };
+
+	for (const FName& Socket : Sockets)
+	{
+		// 插槽不存在时 SpawnSystemAttached 照样返回有效组件，只是挂在组件原点（角色脚底），
+		// 表现为「火从脚下冒出来」——和刀根粒子一个道理，必须当场报出来。
+		if (Mesh && !(Mesh->DoesSocketExist(Socket) || Mesh->GetBoneIndex(Socket) != INDEX_NONE))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[Stealth] 双手充能：%s 上找不到插槽 %s → 这一侧不生成"),
+				*GetNameSafe(Mesh->GetSkeletalMeshAsset()), *Socket.ToString());
+			continue;
+		}
+
+		// bAutoDestroy=false：销毁时机自己管（见 DestroyUnarmedCharge），
+		// 交给 auto destroy 的话 emitter 是无限循环时永远等不到，每破一次隐泄漏一个组件。
+		UNiagaraComponent* Comp = UNiagaraFunctionLibrary::SpawnSystemAttached(
+			System, AttachTo, Socket, FVector::ZeroVector, FRotator::ZeroRotator,
+			EAttachLocation::SnapToTarget, /*bAutoDestroy=*/false, /*bAutoActivate=*/true,
+			ENCPoolMethod::None, /*bPreCullCheck=*/false);
+
+		if (Comp)
+		{
+			if (bUnarmedChargeOnlyOwnerSee)
+			{
+				Comp->SetOnlyOwnerSee(true);
+			}
+			UnarmedChargeComps.Add(Comp);
+		}
+	}
+}
+
+void AGC_Stealth::DestroyUnarmedCharge()
+{
+	for (TObjectPtr<UNiagaraComponent>& Comp : UnarmedChargeComps)
+	{
+		if (!Comp)
+		{
+			continue;
+		}
+
+		// 先停生成、让已生成的粒子自己走完寿命：直接 DestroyComponent 会把正在亮着的火苗
+		// 硬切掉，破隐那一瞬间手上一闪。SetAutoDestroy 让组件在粒子收完之后自己销毁。
+		Comp->Deactivate();
+		Comp->SetAutoDestroy(true);
+
+		// 兜底：NS 的 emitter 要是设成无限循环，auto destroy 永远等不到 ——
+		// 那就每破一次隐泄漏一个常驻组件。延时强拆一个定时器，组件已经没了就是 no-op。
+		// （不用 SetInactiveResponse：本机的 Niagara 插件源码没随引擎装，
+		//   那个枚举的成员名没法核对，不想拿编译赌。）
+		TWeakObjectPtr<UNiagaraComponent> WeakComp = Comp;
+		if (UWorld* World = GetWorld())
+		{
+			FTimerHandle TimerHandle;
+			World->GetTimerManager().SetTimer(TimerHandle, FTimerDelegate::CreateLambda([WeakComp]()
+			{
+				if (UNiagaraComponent* Alive = WeakComp.Get())
+				{
+					Alive->DestroyComponent();
+				}
+			}), UnarmedChargeTeardownDelay, /*bLoop=*/false);
+		}
+	}
+	UnarmedChargeComps.Reset();
 }
 
 void AGC_Stealth::SpawnCountdown(USceneComponent* AttachTo)

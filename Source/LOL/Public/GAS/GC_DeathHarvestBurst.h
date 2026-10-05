@@ -32,8 +32,6 @@ public:
 	TSoftObjectPtr<UParticleSystem> Particle;
 
 	/** 一次性音效（可空）。用软引用：默认值只是路径，编辑器里随时换。 */
-	UPROPERTY(EditDefaultsOnly, Category="Burst")
-	TSoftObjectPtr<USoundBase> Sound;
 
 	/** 粒子相对命中点抬高多少（有些特效原点在脚底）。 */
 	UPROPERTY(EditDefaultsOnly, Category="Burst")

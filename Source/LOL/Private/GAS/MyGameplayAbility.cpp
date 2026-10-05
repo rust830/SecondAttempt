@@ -4,6 +4,7 @@
 #include "GAS/MyGameplayAbility.h"
 #include "GAS/MyAbilitySystemComponent.h"
 #include "GAS/HeroCombatAttributeSet.h"
+#include "GAS/GE_AbilityCost.h"
 #include "GameplayEffect.h"
 #include "GAS/LOLGameplayTags.h"
 #include "AbilitySystemComponent.h"
@@ -11,6 +12,10 @@
 
 UMyGameplayAbility::UMyGameplayAbility()
 {
+	// 消耗 GE 的默认类写在这里而不是头文件：头文件里写默认值得 include 那个 GE 的声明，
+	// 而 GE 又要 include 属性集 —— 基类头文件被十几个技能包含，不想把这条依赖摊开。
+	CostGameplayEffect = UGE_AbilityCost::StaticClass();
+
 	// 所有技能共享的准入状态，只有这一处声明 —— 子类不要再把 State.Dead / State.Stunned 加一遍。
 	//
 	// 判定读的是 ASC 的 OwnedGameplayTags，所以 GE 授予的标签和 AddLooseGameplayTag 都算
@@ -23,6 +28,10 @@ UMyGameplayAbility::UMyGameplayAbility()
 	// 加在这一层会让平 A 也哑掉。要沉默的技能各自在构造函数里加，见各法术技能。
 	ActivationBlockedTags.AddTag(LOLGameplayTags::State_Dead);
 	ActivationBlockedTags.AddTag(LOLGameplayTags::State_Stunned);
+	// 击退和眩晕同级的硬控：被击退期间挡一切技能（含普攻）。
+	ActivationBlockedTags.AddTag(LOLGameplayTags::State_Knockback);
+	// 击飞同理：升空落地前挡一切技能。
+	ActivationBlockedTags.AddTag(LOLGameplayTags::State_KnockUp);
 }
 
 FGameplayTag UMyGameplayAbility::GetGameplayEventTriggerTag() const
@@ -63,6 +72,55 @@ void UMyGameplayAbility::ApplyCooldown(const FGameplayAbilitySpecHandle Handle, 
 	if (SpecHandle.IsValid() && CooldownDuration > 0) {
 		SpecHandle.Data->SetSetByCallerMagnitude(LOLGameplayTags::Data_Cooldown, ComputeCooldownWithAbilityHaste(ActorInfo));
 	}
+	ApplyGameplayEffectSpecToOwner(Handle, ActorInfo, ActivationInfo, SpecHandle);
+}
+
+bool UMyGameplayAbility::CheckCost(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, FGameplayTagContainer* OptionalRelevantTags) const
+{
+	// 免费技能 / 没配消耗 GE：走引擎默认（引擎那条路在没有 CostGE 时也是直接返回 true）。
+	if (ManaCost <= 0.f || !CostGameplayEffect)
+	{
+		return Super::CheckCost(Handle, ActorInfo, OptionalRelevantTags);
+	}
+
+	const UAbilitySystemComponent* ASC = ActorInfo ? ActorInfo->AbilitySystemComponent.Get() : nullptr;
+	if (!ASC)
+	{
+		// 拿不到 ASC 就当「够了」：这里返回 false 会让技能在所有还没 InitAbilityActorInfo 的
+		// 场合（召唤师技能在 PlayerState::BeginPlay 授予）直接放不出来，比「没扣到蓝」糟得多。
+		return true;
+	}
+
+	const float Current = ASC->GetNumericAttribute(UHeroCombatAttributeSet::GetEnergyAttribute());
+	const bool bAffordable = Current + KINDA_SMALL_NUMBER >= ManaCost;
+	if (!bAffordable)
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("[Cost] %s 能量不够：当前 %.1f / 需要 %.1f → 不激活（不进冷却）"),
+			*GetName(), Current, ManaCost);
+	}
+	return bAffordable;
+}
+
+void UMyGameplayAbility::ApplyCost(const FGameplayAbilitySpecHandle Handle, const FGameplayAbilityActorInfo* ActorInfo, const FGameplayAbilityActivationInfo ActivationInfo) const
+{
+	if (ManaCost <= 0.f || !CostGameplayEffect)
+	{
+		Super::ApplyCost(Handle, ActorInfo, ActivationInfo);
+		return;
+	}
+
+	// 和 ApplyCooldown 同一条路：MakeOutgoingGameplayEffectSpec 带上 AbilityLevel，
+	// ApplyGameplayEffectSpecToOwner 按预测键自己决定本地预测还是权威施加。
+	FGameplayEffectSpecHandle SpecHandle = MakeOutgoingGameplayEffectSpec(CostGameplayEffect, GetAbilityLevel());
+	if (!SpecHandle.IsValid())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Cost] %s 的消耗 GE(%s) Spec 无效 → 这次没扣蓝"),
+			*GetName(), *GetNameSafe(CostGameplayEffect));
+		return;
+	}
+
+	// 负号只在这一处写：GE 上是 Additive，填 -ManaCost 才是「扣」。
+	SpecHandle.Data->SetSetByCallerMagnitude(LOLGameplayTags::Data_Cost, -ManaCost);
 	ApplyGameplayEffectSpecToOwner(Handle, ActorInfo, ActivationInfo, SpecHandle);
 }
 

@@ -1,4 +1,4 @@
-// 英雄属性集的「只读数值快照」：24 条属性的当前值，一个字段一条，全是裸数值。
+// 英雄属性集的「只读数值快照」：27 条属性的当前值，一个字段一条，全是裸数值。
 //
 // 【为什么不带百分比】
 // 这个结构体回答的是「数值是多少」，不是「进度条画多长」。两件事分开：
@@ -60,12 +60,18 @@ struct LOL_API FHeroAttributeView
 	// -----------------------------------------------------------------------
 
 	UPROPERTY(BlueprintReadOnly, Category = "Hero|Offense") float AttackDamage = 0.f;
+	/** 法术强度。目前只是数据，伤害公式还没读它。 */
+	UPROPERTY(BlueprintReadOnly, Category = "Hero|Offense") float AbilityPower = 0.f;
 	UPROPERTY(BlueprintReadOnly, Category = "Hero|Offense") float BaseAttackSpeed = 0.f;
 	UPROPERTY(BlueprintReadOnly, Category = "Hero|Offense") float AttackSpeedRatio = 0.f;
 	/** 攻速加成百分比（0.5 = +50%）。它本身就是个「数值」，不是我们派生出来的比率。 */
 	UPROPERTY(BlueprintReadOnly, Category = "Hero|Offense") float BonusAttackSpeedPercent = 0.f;
 	/** 派生值：BaseAttackSpeed + AttackSpeedRatio × BonusAttackSpeedPercent。 */
 	UPROPERTY(BlueprintReadOnly, Category = "Hero|Offense") float FinalAttackSpeed = 0.f;
+	/** 暴击率，0~1（0.25 = 25%）。要显示成百分数由调用方 ×100。 */
+	UPROPERTY(BlueprintReadOnly, Category = "Hero|Offense") float CritChance = 0.f;
+	/** 暴击伤害【倍率】，2.0 = 200%。同上是裸数值，显示成百分数由调用方 ×100。 */
+	UPROPERTY(BlueprintReadOnly, Category = "Hero|Offense") float CritDamage = 0.f;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Hero|Offense") float FlatArmorPen = 0.f;
 	UPROPERTY(BlueprintReadOnly, Category = "Hero|Offense") float PercentArmorPen = 0.f;

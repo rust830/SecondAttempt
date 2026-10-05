@@ -15,6 +15,9 @@
 //   · 冷却状态【只由标签翻转】。倒计时跑完不点亮图标，必须等 State.Cooldown.X 真的落到 0。
 //     数字可以回弹，状态不可以 —— 否则客户端会出现「图标亮着但按下去被拒」。
 //
+// 一条容易漏的：Observed 通道除了属性 + 标签，还要听目标的 OnDestroyed。
+// 弱引用变 null 不会触发任何回调，只听属性/标签的话，目标一销毁目标框就冻在最后一帧。
+//
 // 放 GAS/ 而不是 UI/：它直接操作 ASC / GameplayEffect / GameplayTag（CONVENTIONS.md 规则 2）。
 
 #pragma once
@@ -23,22 +26,17 @@
 #include "UObject/Object.h"
 #include "GameplayTagContainer.h"
 #include "GameplayEffectTypes.h"
+#include "GAS/HUDAttributeBinding.h"
 #include "UI/HUDTypes.h"
 #include "HeroHUDController.generated.h"
 
 class AActor;
+class UHeroAttributePanelConfig;
 class UHeroCombatAttributeSet;
 class UHeroHUDSlotConfig;
 class UMyAbilitySystemComponent;
 class UWorld;
 struct FHeroHUDSlotEntry;
-
-/** 一条已注册的标签事件。解绑要 (Handle, Tag) 成对，所以要一起存。 */
-struct FHUDBoundTagEvent
-{
-	FGameplayTag Tag;
-	FDelegateHandle Handle;
-};
 
 /**
  * 本地玩家的 HUD 翻译层。Outer 必须是 ALOLPlayerController（ResolveSelfASC 顺着 Outer 找 PS）。
@@ -106,6 +104,30 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "HUD")
 	void SetSlotConfig(UHeroHUDSlotConfig* InConfig);
 
+	/**
+	 * 按【当前】SlotConfig 重算一遍全部槽位的静态表现并强制重播。**不重置运行期状态**。
+	 *
+	 * 【为什么需要这个入口】DataAsset 在 PIE 运行期被改时，引擎不会通知任何人；
+	 * 而 CachedSlots 存的是一份【早就算好】的视图，PullHUDState() 只会把那份旧的再端一遍。
+	 * 没有这个函数，「改了 SlotSizeScale 想立刻看看效果」就只能重启 PIE。
+	 *
+	 * 【和 SetSlotConfig 的区别】那个是"换配置"（槽位集合可能都变了，所以整块重来）；
+	 * 这个是"同一份配置的内容被改了"，所以只刷新配置决定的那些量
+	 *（Icon / KeyLabel / DisplayName / Kind / SlotSizeScale / bHidden），
+	 * 冷却秒数、可用性状态、能力归属这些算出来的东西原样保留。
+	 */
+	UFUNCTION(BlueprintCallable, Category = "HUD")
+	void RefreshSlotViewsFromConfig();
+
+	/**
+	 * 属性面板配置。**必须在 TryBindHUD 之前调** —— 面板订阅哪些属性就是照着它来的，
+	 * 晚于第一次绑定的话，第一次绑定不会订阅面板属性，面板会一直显示 0。
+	 *
+	 * 和 SetSlotConfig 一样是幂等重绑：换配置 = 订阅的属性集合变了，旧的依据已经没了。
+	 */
+	UFUNCTION(BlueprintCallable, Category = "HUD")
+	void SetAttributePanelConfig(UHeroAttributePanelConfig* InConfig);
+
 	/** 技能栏槽位数（= UI 上要建几个 WBP_SkillSlot）。 */
 	UFUNCTION(BlueprintPure, Category = "HUD")
 	int32 GetNumSlots() const;
@@ -146,6 +168,15 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "HUD")
 	FOnHUDReadySignature OnHUDReady;
 
+	/**
+	 * 英雄属性面板（整块）。属性事件驱动，两端都触发。
+	 *
+	 * 【为什么不是 30Hz 心跳】属性和冷却不一样：冷却是个连续递减的量，必须采样；
+	 * 属性只在 GE 施加/移除的那一瞬间变，事件就够，而且事件比采样更准（不会漏掉一帧内的两次变化）。
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "HUD")
+	FOnHUDAttributesChangedSignature OnAttributesChanged;
+
 private:
 	// ---- 绑定实现 ----
 
@@ -166,10 +197,21 @@ private:
 
 	// ---- 事件回调 ----
 
-	void OnHealthAttributeChanged(const FOnAttributeChangeData& Data);
-	void OnMaxHealthAttributeChanged(const FOnAttributeChangeData& Data);
-	void OnEnergyAttributeChanged(const FOnAttributeChangeData& Data);
-	void OnMaxEnergyAttributeChanged(const FOnAttributeChangeData& Data);
+	/**
+	 * Self 通道的四种资源（血 / 最大血 / 能量 / 最大能量）共用这一个回调 ——
+	 * 处理逻辑完全一样（重算一遍，变了才推），分成四个只会多出「忘了绑其中一条」的机会。
+	 * 能量那条额外要把所有槽重算一遍（喂「蓝不够」的灰化），那是 RebuildVitals 之后的第二件事。
+	 */
+	void OnSelfVitalsAttributeChanged(const FOnAttributeChangeData& Data);
+
+	/**
+	 * Self 通道的属性面板那批属性共用这一个回调。
+	 *
+	 * 【为什么一个回调能服务所有面板属性】RebuildAttributes 每次都是「读全部条目、重算整块」，
+	 * 不关心是哪一个属性变了 —— 属性之间本来就会互相影响（比如以后加「攻速加成影响最终攻速」），
+	 * 按属性分流反而要维护一张「谁影响谁」的表。
+	 */
+	void OnSelfAttributesAttributeChanged(const FOnAttributeChangeData& Data);
 
 	/** 某个槽的冷却标签 0↔1。状态翻转的【唯一】入口。 */
 	void OnCooldownTagChanged(const FGameplayTag ChangedTag, int32 NewCount);
@@ -177,15 +219,26 @@ private:
 	/** State.Dead / State.Stunned / State.Silenced 计数变化 → 重算所有槽的灰化。 */
 	void OnStatusTagChanged(const FGameplayTag ChangedTag, int32 NewCount);
 
-	void OnObservedHealthChanged(const FOnAttributeChangeData& Data);
-	void OnObservedMaxHealthChanged(const FOnAttributeChangeData& Data);
-	void OnObservedEnergyChanged(const FOnAttributeChangeData& Data);
-	void OnObservedMaxEnergyChanged(const FOnAttributeChangeData& Data);
+	/** Observed 通道的四种资源共用。 */
+	void OnObservedVitalsAttributeChanged(const FOnAttributeChangeData& Data);
+
 	void OnObservedStatusTagChanged(const FGameplayTag ChangedTag, int32 NewCount);
+
+	/**
+	 * 目标被销毁。【必须是 UFUNCTION】：`AActor::OnDestroyed` 是 sparse 动态多播委托，
+	 * 只能 AddDynamic 绑。
+	 *
+	 * 为什么非要有这条：弱引用变 null 【不会】触发任何东西。目标一销毁，它的 ASC 跟着没了，
+	 * 属性/标签事件再也不会打进来，于是目标框永远停在销毁前那一帧 ——
+	 * 敌人是「死了之后过一会儿才 Destroy」，所以表现是屏幕上留一个灰掉的血条不走。
+	 */
+	UFUNCTION()
+	void OnObservedTargetDestroyed(AActor* DestroyedActor);
 
 	// ---- 重算 / 广播 ----
 
 	void RebuildVitals(bool bForceBroadcast);
+	void RebuildAttributes(bool bForceBroadcast);
 	void RebuildSlot(int32 SlotIndex, bool bForceBroadcast);
 	void RebuildAllSlots(bool bForceBroadcast);
 	void RefreshTargetFrame(bool bForceBroadcast);
@@ -211,6 +264,17 @@ private:
 	void ApplyEntryStatic(FSkillSlotView& View, const FHeroHUDSlotEntry* Entry) const;
 
 	/**
+	 * 数值 → 显示文本。格式化的【唯一】实现。
+	 *
+	 * 放在 Controller 而不是 Widget：这样 UI 层永远只收到 FText，不需要认识 EHeroAttributeFormat，
+	 * 也不需要认识配置资产（同 FSkillSlotView 把 Icon / KeyLabel 提前摘出来的理由）。
+	 *
+	 * 做成 static 成员而不是文件内 free function：unity build 把多个 .cpp 合进同一个 TU 时，
+	 * 匿名 namespace 里的同名函数会撞（这个坑本项目已经踩过一次）。
+	 */
+	static FText FormatAttributeValue(float Value, EHeroAttributeFormat Format);
+
+	/**
 	 * 预留位的【唯一】判据：配了 bHideWhenUnavailable 且这个槽上现在没有能力。
 	 *
 	 * 做成 static 成员而不是文件内 free function：既能被四处共用，又不会像匿名 namespace
@@ -224,15 +288,29 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<UHeroHUDSlotConfig> SlotConfig;
 
+	/**
+	 * 属性面板配置。强引用（同 SlotConfig）。
+	 *
+	 * 注意它同时承担两个职责：① 面板显示什么；② Self 通道要订阅哪些属性。
+	 * 合成一份是有意的 —— 两份配置迟早会出现「面板上有这条、但订阅漏了它」这种
+	 * 「显示 0 且永远不动」的坏状态，而那种症状看起来像数值算错了。
+	 */
+	UPROPERTY(Transient)
+	TObjectPtr<UHeroAttributePanelConfig> AttributePanelConfig;
+
 	/** Self 通道绑着的那个 ASC。弱引用 —— 强引用会把 PlayerState 一起钉住。 */
 	UPROPERTY(Transient)
 	TWeakObjectPtr<UMyAbilitySystemComponent> BoundASC;
 
-	FDelegateHandle HealthHandle;
-	FDelegateHandle MaxHealthHandle;
-	FDelegateHandle EnergyHandle;
-	FDelegateHandle MaxEnergyHandle;
-	TArray<FHUDBoundTagEvent> BoundTagEvents;
+	/**
+	 * Self 通道的属性委托 + 标签事件记账。
+	 *
+	 * 它自己内部也存一份弱引用 ASC（Unbind 时要用它找回那几条委托）。
+	 * 和上面 BoundASC 的分工是刻意的，别合并：BoundASC 是【身份】（TryBindHUD 的幂等键、
+	 * 所有数值读取都走它），绑定的句柄是【副作用】。混在一起会让幂等判断依赖绑定状态，
+	 * 而绑定失败恰恰是幂等判断要处理的情况之一。
+	 */
+	FHUDAttributeBinding SelfBinding;
 
 	/** Observed 通道。用基类指针即可：只读属性 + 听标签。 */
 	UPROPERTY(Transient)
@@ -240,11 +318,8 @@ private:
 	UPROPERTY(Transient)
 	TWeakObjectPtr<UAbilitySystemComponent> ObservedASC;
 
-	FDelegateHandle ObservedHealthHandle;
-	FDelegateHandle ObservedMaxHealthHandle;
-	FDelegateHandle ObservedEnergyHandle;
-	FDelegateHandle ObservedMaxEnergyHandle;
-	TArray<FHUDBoundTagEvent> ObservedTagEvents;
+	/** Observed 通道的记账。目标被销毁时还要额外摘掉它的 OnDestroyed（见 UnbindObserved）。 */
+	FHUDAttributeBinding ObservedBinding;
 
 	/** 给 UI 看的投影（缓存）。PullHUDState() 直接返回它。 */
 	UPROPERTY(Transient)
@@ -253,6 +328,8 @@ private:
 	TArray<FSkillSlotView> CachedSlots;
 	UPROPERTY(Transient)
 	FTargetFrameView CachedTarget;
+	UPROPERTY(Transient)
+	FHeroAttributePanelView CachedAttributes;
 
 	/** 冷却数字的采样心跳。 */
 	FTimerHandle CooldownTickHandle;

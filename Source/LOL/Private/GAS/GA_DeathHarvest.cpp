@@ -4,6 +4,7 @@
 #include "GAS/DeathHarvestData.h"
 #include "GAS/GE_DeathHarvestCooldown.h"
 #include "GAS/LOLGameplayTags.h"
+#include "GAS/LocalPlayerUtils.h"
 #include "GAS/MyAbilitySystemComponent.h"   // FindAbilitySystemComponent：目标校验要用和客户端同一个解析器
 #include "Abilities/Tasks/AbilityTask_PlayMontageAndWait.h"
 #include "Abilities/Tasks/AbilityTask_Repeat.h"
@@ -129,6 +130,10 @@ void UGA_DeathHarvest::ActivateAbility(const FGameplayAbilitySpecHandle Handle, 
 	// 同一类问题：兜底瞄准线是上一趟的坐标。这一行漏掉的表现是「第二趟大招镜头甩向上一趟的消失点」
 	//（只在锁不到目标时才会显现，平时看不出来）。
 	bHasVanishLocation = false;
+
+	// 海克斯眩晕的「本次已放过」标记，同样是实例复用必须清的那一批。
+	// 漏这一行的表现：第一次 R 有眩晕，之后每次 R 都没有（而且完全看不出因果）。
+	bAugmentStunApplied = false;
 
 	// ---------------------------------------------------------------------
 	// 客户端这一次：锁移动 + 对齐时间轴后播转圈蒙太奇。
@@ -673,28 +678,6 @@ bool UGA_DeathHarvest::IsSpotFree(const FVector& Location, const AActor* Ignored
 	const bool bBlocked = GetWorld()->SweepSingleByChannel(
 		Hit, Center, Center, FQuat::Identity, ECC_Pawn, Probe, Params);
 
-	// [DEBUG-dh5c] 临时诊断：把"被挡"是「擦着地面」还是「真嵌进去」量出来 ——
-	// 逐个抬高试，记下第一个放行的高度。0.01cm 级就放行 = 零深度接触（上面 SpotClearance 治的就是它）；
-	// 一路高到 5cm 还被挡 = 真重叠，得另找原因（比如地面射线的命中点和碰撞面不是同一个面）。
-	// 确认完连同这一段一起删（grep DEBUG-dh5c）。
-	const bool bDebugSpotLadder = true;
-	if (bDebugSpotLadder)
-	{
-		float FirstFreeLift = -1.f;
-		FHitResult LadderHit;
-		for (const float Lift : {0.f, 0.01f, 0.1f, 0.5f, 1.f, 2.f, 5.f})
-		{
-			const FVector Lifted = Location + FVector(0.f, 0.f, HalfHeight + Lift);
-			if (!GetWorld()->SweepSingleByChannel(LadderHit, Lifted, Lifted, FQuat::Identity, ECC_Pawn, Probe, Params))
-			{
-				FirstFreeLift = Lift;
-				break;
-			}
-		}
-		UE_LOG(LogTemp, Warning, TEXT("[DEBUG-dh5c] 落点 (%.0f, %.0f, %.0f)：抬 %.2fcm 就放行（-1 = 抬到 5cm 还被挡）"),
-			Location.X, Location.Y, Location.Z, FirstFreeLift);
-	}
-
 	if (bBlocked)
 	{
 		// 被谁挡住 —— 全废时这一行直接指出「是不是目标自己站在候选点上」。
@@ -990,14 +973,18 @@ float UGA_DeathHarvest::ScaledWorldSeconds(float RealSeconds) const
 
 bool UGA_DeathHarvest::IsLocallyControlledAvatar() const
 {
-	// ★ 用 IsLocallyControlled 而不是 HasAuthority，三种情况一次分清：
-	//   单机 / 主机自己放 → true（那个 PlayerController 就是本地玩家）；
-	//   专用服务器上跑的远端玩家 → false（有 Authority 但不是本地，甩镜没意义）；
-	//   客户端本端 → true（AutonomousProxy）。
-	//   （实现在 AController::IsLocalController：Standalone / Client+AutonomousProxy /
-	//     Authority 且 RemoteRole 不是 AutonomousProxy，这三种才为真。）
-	const APawn* Pawn = Cast<APawn>(GetAvatarActorFromActorInfo());
-	return Pawn && Pawn->IsLocallyControlled();
+	// 问的是「这台机器上是不是【我】在放这个技能」——甩镜是纯本机表现，Bot 放不需要甩。
+	// 三种情况一次分清：
+	//   单机 / 主机自己放 → true；专用服务器上跑的远端玩家 → false；客户端本端 → true。
+	//
+	// ★ 原来用的是 Pawn->IsLocallyControlled()，它转发给 AController::IsLocalController()，
+	//   而那个函数在 NM_Standalone 下【无条件返回 true】（Controller.cpp:94-98）——
+	//   于是单机打 AI 时 Bot 放死亡收割也会判成「本机在放」，跟着去甩镜，
+	//   和 AArenaBotController::Tick 里的 SetFocus → UpdateControlRotation 抢同一个控制旋转。
+	//   （上面那句"单机 → true（那个 PlayerController 就是本地玩家）"就是错在这一步：
+	//     Bot 的 Controller 是 AAIController，从来就不是 PlayerController。）
+	//   详见 GAS/LocalPlayerUtils.h。
+	return LOLLocalPlayer::IsLocalPlayerControlled(GetAvatarActorFromActorInfo());
 }
 
 void UGA_DeathHarvest::ArmCameraAlignTick()
@@ -1297,6 +1284,47 @@ bool UGA_DeathHarvest::ApplySpinDamage(AActor* Target, const FHitResult& Hit)
 
 	SourceASC->ApplyGameplayEffectSpecToTarget(*Spec.Data.Get(), TargetASC);
 
+	// =============================================================================
+	// 海克斯「死亡收割 · 压制」：命中额外挂眩晕，【只第一跳】
+	//
+	// 判据是 ASC 上的状态标签（由 GE_Arena_Augment_DeathHarvestStun 的 TargetTags 组件授予），
+	// 技能只读不写 —— 配海克斯不用回来改这个类，不配就完全不进这个分支。
+	//
+	// ★ bAugmentStunApplied 那个门是【强度约束】，不是优化：
+	//   转圈是 SpinCount=8 × SpinInterval=0.25s = 2 秒、8 次 ApplySpinDamage，
+	//   而 UGE_Stun 是 HasDuration，重复施加对已生效的同源实例是【刷新时长不是叠层】
+	//   ⇒ 每跳都施 = 对手被锁死整整 2 秒且中途无法交闪，远超 LoL 同类大招。
+	//   要调强度改 AugmentStunDuration，**不要**把这个门删掉。
+	//
+	// 时长 <= 0 也要挡住：配成 0 的效果是「GE 挂上就立刻过期」，静默失效且没有任何日志
+	// —— 和 SetByCaller 不填是同一个坑。
+	// =============================================================================
+	if (!bAugmentStunApplied && AugmentStunEffect && AugmentStunDuration > 0.f
+		&& SourceASC->HasMatchingGameplayTag(LOLGameplayTags::Hex_DeathHarvest_Stun))
+	{
+		// 独立一份 Context：不要复用上面伤害那份。Context 会被 GE 组件读
+		//（从里面取 HitResult 算方向/位置），共用一份会让后面挂的 GE 拿到被改写过的命中信息。
+		FGameplayEffectContextHandle StunContext = SourceASC->MakeEffectContext();
+		StunContext.AddHitResult(Hit);
+
+		FGameplayEffectSpecHandle StunSpec =
+			SourceASC->MakeOutgoingSpec(AugmentStunEffect, GetAbilityLevel(), StunContext);
+		if (StunSpec.IsValid())
+		{
+			StunSpec.Data->SetSetByCallerMagnitude(LOLGameplayTags::Data_ControlDuration, AugmentStunDuration);
+			SourceASC->ApplyGameplayEffectSpecToTarget(*StunSpec.Data.Get(), TargetASC);
+			// 只在真的挂上之后置位 —— 放前面的话 Spec 失败一次就再也不试了
+			//（这一趟 R 剩下的跳全被门掉，整趟完全没有眩晕，而日志只有一条 Warning）。
+			bAugmentStunApplied = true;
+		}
+		else
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[DeathHarvest][%s] 海克斯眩晕没挂上：AugmentStunEffect(%s) 的 Spec 无效"),
+				NetModeText(GetWorld()), *GetNameSafe(AugmentStunEffect));
+		}
+	}
+
 	// 命中表现走 cue：这个函数只在服务端跑，直接 Spawn 的话粒子只有主机看得到
 	// （GC_ThrowDaggerHit 修掉的是同一个坑）。镜头震动也挂在这条 cue 上
 	// （UGC_DeathHarvestBurst::CameraShake，只在施法者本机真的摇）。
@@ -1350,8 +1378,7 @@ void UGA_DeathHarvest::ApplySpinRotationOverride(bool bOn)
 
 	if (!bOn)
 	{
-		// 只在真正关过的时候恢复，避免取消/提前结束路径把默认值误写回去
-		// （照 ThrowDaggerAbility.cpp:302 那个 bOrientRotationOverridden 的写法）。
+		// 只在真正关过的时候恢复，避免取消/提前结束路径把默认值误写回去。
 		if (bOrientRotationOverridden)
 		{
 			MoveComp->bOrientRotationToMovement = bSavedOrientRotationToMovement;

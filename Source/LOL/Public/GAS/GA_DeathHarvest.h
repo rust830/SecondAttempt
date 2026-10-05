@@ -357,4 +357,43 @@ private:
 
 	/** State.DeathHarvest.Casting 是不是我挂的（只挂/摘自己挂的那一份）。 */
 	bool bCastingTagAdded = false;
+
+	// =============================================================================
+	// 海克斯「死亡收割 · 压制」：命中附加一次眩晕
+	//
+	// 【只在 ASC 上了 Hex.DeathHarvest.Stun 时才生效】—— 所以配海克斯不用回来改这个类。
+	// 留空 = R 不带任何额外控制（默认，也就是改动前的行为）。
+	//
+	// ⚠️ 下面这两个是【可配项】，所以上面这段插了个 protected: ——
+	//    UHT 不允许 BlueprintReadOnly 出现在 private 成员上（那样蓝图根本读不到，
+	//    而它们本来就该在 BP 的 Class Defaults 里填）。段首的 private: 在它们之后恢复。
+	// =============================================================================
+
+protected:
+	/**
+	 * 附加的眩晕 GE（配 UGE_Stun）。留空 = 不附带眩晕。
+	 *
+	 * 选 GE_Stun 而不是 GE_Knockback：眩晕有现成的 GC_Stun 蒙太奇、手感最标准，
+	 * 而且不引入击退方向那个四级回退的坑（见 UGEComponent_Knockback 的方向优先级表）。
+	 * ⚠️ 这里【只挂 GE、不自己 LaunchCharacter】—— 眩晕本来就没有位移。
+	 *   （击退的位移由 UGE_Knockback 自带的 UGEComponent_Knockback 做；
+	 *     击飞没有组件、要施加方自己 Launch，见 UGA_SpinSlash::LaunchTarget。）
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Augment")
+	TSubclassOf<UGameplayEffect> AugmentStunEffect;
+
+	/** 上面那个 GE 的眩晕时长（秒），用 SetByCaller Data.ControlDuration 填。 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Augment", meta = (ClampMin = "0", Units = "s"))
+	float AugmentStunDuration = 0.5f;
+
+private:
+	/**
+	 * 本次激活已经放过海克斯眩晕了没有。
+	 *
+	 * ⚠️【只第一跳】—— 强度约束，不是优化。转圈 8 跳 × 0.25s = 2 秒，而 UGE_Stun 是
+	 * HasDuration、重复施加刷新时长不叠层 ⇒ 每跳都施会把对手锁死整整 2 秒。
+	 * ⚠️ 必须每次 ActivateAbility 清一次（技能实例 InstancedPerActor、全对局复用同一个对象）：
+	 *   忘了清的症状是「第一次 R 有眩晕，之后每次都没有」，且完全看不出因果。
+	 */
+	bool bAugmentStunApplied = false;
 };

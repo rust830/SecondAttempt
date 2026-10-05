@@ -32,6 +32,4 @@ public:
 	TObjectPtr<UParticleSystem> FlashParticle;
 
 	/** 闪现音效（可空）。 */
-	UPROPERTY(EditDefaultsOnly, Category = "Flash")
-	TObjectPtr<USoundBase> FlashSound;
 };

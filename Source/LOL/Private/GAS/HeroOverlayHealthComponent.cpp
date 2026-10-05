@@ -119,38 +119,24 @@ void UHeroOverlayHealthComponent::Bind()
 
 	BoundASC = ASC;
 
-	HealthHandle = ASC->GetGameplayAttributeValueChangeDelegate(UHeroCombatAttributeSet::GetHealthAttribute())
-		.AddUObject(this, &UHeroOverlayHealthComponent::OnHealthChanged);
-	MaxHealthHandle = ASC->GetGameplayAttributeValueChangeDelegate(UHeroCombatAttributeSet::GetMaxHealthAttribute())
-		.AddUObject(this, &UHeroOverlayHealthComponent::OnMaxHealthChanged);
+	// 头顶血条只要血，不要能量 —— 所以这里只绑两条，不是照抄 HUD 那四条。
+	static const TArray<FGameplayAttribute> VitalsAttributes = {
+		UHeroCombatAttributeSet::GetHealthAttribute(),
+		UHeroCombatAttributeSet::GetMaxHealthAttribute(),
+	};
+	Binding.BindAttributes(ASC, VitalsAttributes, this, &UHeroOverlayHealthComponent::OnVitalsAttributeChanged);
 
 	// 死亡用标签，不用 Health == 0 —— 和技能那边同一个判据。
-	DeadTagHandle = ASC
-		->RegisterGameplayTagEvent(LOLGameplayTags::State_Dead, EGameplayTagEventType::NewOrRemoved)
-		.AddUObject(this, &UHeroOverlayHealthComponent::OnDeadTagChanged);
+	Binding.BindTag(ASC, LOLGameplayTags::State_Dead, this, &UHeroOverlayHealthComponent::OnDeadTagChanged);
 }
 
 void UHeroOverlayHealthComponent::Unbind()
 {
-	if (UAbilitySystemComponent* ASC = BoundASC.Get())
-	{
-		if (HealthHandle.IsValid())
-		{
-			ASC->GetGameplayAttributeValueChangeDelegate(UHeroCombatAttributeSet::GetHealthAttribute()).Remove(HealthHandle);
-		}
-		if (MaxHealthHandle.IsValid())
-		{
-			ASC->GetGameplayAttributeValueChangeDelegate(UHeroCombatAttributeSet::GetMaxHealthAttribute()).Remove(MaxHealthHandle);
-		}
-		if (DeadTagHandle.IsValid())
-		{
-			ASC->UnregisterGameplayTagEvent(DeadTagHandle, LOLGameplayTags::State_Dead, EGameplayTagEventType::NewOrRemoved);
-		}
-	}
+	// 摘句柄的记账共用一份（见 FHUDAttributeBinding）—— 原来这里是第二份手写的同款代码。
+	Binding.Unbind();
 
-	HealthHandle.Reset();
-	MaxHealthHandle.Reset();
-	DeadTagHandle.Reset();
+	// BoundASC 是「现在观察谁」的一部分，解绑时才清；它和 Binding 内部那份弱引用分工不同：
+	// BoundASC 给 Refresh() 读数值用，Binding 那份只在解绑时用来找回委托。
 	BoundASC = nullptr;
 }
 
@@ -179,12 +165,7 @@ void UHeroOverlayHealthComponent::Refresh()
 	TargetWidget->ApplyOverlayVitals(Vitals, bIsDead, bHideWhenFullHealth, bHideWhenDead);
 }
 
-void UHeroOverlayHealthComponent::OnHealthChanged(const FOnAttributeChangeData& Data)
-{
-	Refresh();
-}
-
-void UHeroOverlayHealthComponent::OnMaxHealthChanged(const FOnAttributeChangeData& Data)
+void UHeroOverlayHealthComponent::OnVitalsAttributeChanged(const FOnAttributeChangeData& Data)
 {
 	Refresh();
 }
