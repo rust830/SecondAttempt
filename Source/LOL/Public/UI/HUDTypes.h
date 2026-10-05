@@ -101,6 +101,99 @@ enum class EHeroHUDSlotKind : uint8
 };
 
 /**
+ * 属性数值的【显示口径】。定义在这里而不是 GAS 层，是因为依赖方向必须是 GAS → UI：
+ * GAS 层的配置资产（UHeroAttributePanelConfig）需要这个枚举，UI 层不需要知道
+ * FGameplayAttribute 是什么（同 EHeroHUDSlotKind 的先例）。
+ *
+ * 加一种口径（比如「一万以上写成 1.2w」）在这里加一个值 + Controller 里加一个 case，
+ * 面板资产里就能直接选 —— Widget 永远只收到格式化好的 FText。
+ */
+UENUM(BlueprintType)
+enum class EHeroAttributeFormat : uint8
+{
+	/** 四舍五入取整。移速 345、护甲 23 这类。 */
+	Integer      UMETA(DisplayName = "Integer"),
+	/** 一位小数。最终攻速 0.8、吸血 2.5% 这类需要精度又不需要三位的。 */
+	OneDecimal   UMETA(DisplayName = "One Decimal"),
+	/** 先 ×100 再取整、末尾加 %（0.25 → "25%"）。暴击率 / 百分比穿透 / 韧性走这个。 */
+	Percent      UMETA(DisplayName = "Percent"),
+};
+
+/**
+ * 属性面板上的【一行】。
+ *
+ * 全部内容都是「显示所需的最终形态」：Icon 选好了、数值已经格式化成文本了。
+ * Widget 拿到它只管往控件上写，不做任何数值判断 —— 和 FSkillSlotView 同一个理由。
+ */
+USTRUCT(BlueprintType)
+struct FHeroAttributeEntryView
+{
+	GENERATED_BODY()
+
+	/** 留空 = 该行不画图标，只显示数值（Widget 会把 IconImage 收起来）。 */
+	UPROPERTY(BlueprintReadOnly, Category = "HUD")
+	TObjectPtr<UTexture2D> Icon = nullptr;
+
+	/** 属性名（"攻击力"），展开态显示用。 */
+	UPROPERTY(BlueprintReadOnly, Category = "HUD")
+	FText DisplayName;
+
+	/** 已经格式化好的数值文本（"345" / "0.8" / "25%"）。 */
+	UPROPERTY(BlueprintReadOnly, Category = "HUD")
+	FText ValueText;
+
+	/** true = 常驻那一条里也有它；false = 只有展开后才看得见。 */
+	UPROPERTY(BlueprintReadOnly, Category = "HUD")
+	bool bShowInCompact = false;
+
+	bool EqualsForUI(const FHeroAttributeEntryView& Other) const
+	{
+		return Icon == Other.Icon
+			&& bShowInCompact == Other.bShowInCompact
+			&& DisplayName.EqualTo(Other.DisplayName)
+			&& ValueText.EqualTo(Other.ValueText);
+	}
+};
+
+/**
+ * 整个属性面板的视图。
+ *
+ * 【长度和 UHeroAttributePanelConfig::Entries 一一对应】—— Widget 按下标认行，
+ * 和技能槽「下标 = 槽位号」是同一条约定（不要用 Add 之外的方式打乱它）。
+ */
+USTRUCT(BlueprintType)
+struct FHeroAttributePanelView
+{
+	GENERATED_BODY()
+
+	/**
+	 * false = 还没绑上 ASC（PS 还没到 / 还没 InitAbilityActorInfo）。
+	 * 此时【整个面板收起】，而不是显示一排 0 —— 和「未就绪不画空血条」是同一条纪律。
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "HUD")
+	bool bValid = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "HUD")
+	TArray<FHeroAttributeEntryView> Entries;
+
+	bool EqualsForUI(const FHeroAttributePanelView& Other) const
+	{
+		if (bValid != Other.bValid || Entries.Num() != Other.Entries.Num())
+		{
+			return false;
+		}
+		for (int32 Index = 0; Index < Entries.Num(); ++Index)
+		{
+			if (!Entries[Index].EqualsForUI(Other.Entries[Index]))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+};
+
+/**
  * 一个技能槽的完整 UI 视图。
  *
  * 静态表现（Icon / KeyLabel / DisplayName）也塞在这里，是【故意的】：这样 Widget 完全不需要认识
@@ -137,6 +230,15 @@ struct FSkillSlotView
 	bool bHidden = false;
 
 	// ---- 静态表现（来自 UHeroHUDSlotConfig）----
+
+	/**
+	 * 这一格的尺寸倍率（乘在 UHeroHUDWidget::SkillSlotSize 上）。1 = 和其他格一样大。
+	 *
+	 * 被动那种「小一点」的格子由数据决定，这里只负责把它带过去 —— Widget 拿到的是最终尺寸，
+	 * 不需要认识 EHeroHUDSlotKind，也不需要判断「哪些槽该小」。
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "HUD")
+	float SlotSizeScale = 1.f;
 
 	UPROPERTY(BlueprintReadOnly, Category = "HUD")
 	TObjectPtr<UTexture2D> Icon = nullptr;
@@ -192,6 +294,24 @@ struct FSkillSlotView
 	 */
 	bool EqualsForUI(const FSkillSlotView& Other) const
 	{
+		return EqualSemantics(Other)
+			&& FMath::IsNearlyEqual(CooldownRemaining, Other.CooldownRemaining, 0.005f)
+			&& FMath::IsNearlyEqual(CooldownPercent, Other.CooldownPercent, 0.002f);
+	}
+
+	/**
+	 * 除冷却数字以外的一切是否相同 —— 也就是「这一帧到底发生了什么」：
+	 * 图标 / 键位 / 状态 / 灰化原因 / 显隐 / 充能有没有变。
+	 *
+	 * 用途是给蓝图分流的（见 UHeroSkillSlotWidget::ApplySlotView）：纯数字变化走
+	 * BP_OnCooldownTick，语义变化才走 BP_OnSlotViewChanged。这样「CD 好了闪一下」这类
+	 * 表现逻辑不会被 30Hz 心跳带着每帧重播一遍。
+	 *
+	 * 注意 Duration 不在比较范围内（和 EqualsForUI 一致）：它只是 Remaining 的分母，
+	 * 急速变化时 Percent 会跟着动，不需要单独作为「变了」的依据。
+	 */
+	bool EqualSemantics(const FSkillSlotView& Other) const
+	{
 		return bHasAbility == Other.bHasAbility
 			&& Kind == Other.Kind
 			&& bHidden == Other.bHidden
@@ -200,10 +320,9 @@ struct FSkillSlotView
 			&& Charges == Other.Charges
 			&& MaxCharges == Other.MaxCharges
 			&& Icon == Other.Icon
+			&& SlotSizeScale == Other.SlotSizeScale
 			&& KeyLabel.EqualTo(Other.KeyLabel)
-			&& DisplayName.EqualTo(Other.DisplayName)
-			&& FMath::IsNearlyEqual(CooldownRemaining, Other.CooldownRemaining, 0.005f)
-			&& FMath::IsNearlyEqual(CooldownPercent, Other.CooldownPercent, 0.002f);
+			&& DisplayName.EqualTo(Other.DisplayName);
 	}
 };
 
@@ -284,6 +403,9 @@ struct FHUDSnapshot
 	UPROPERTY(BlueprintReadOnly, Category = "HUD") TArray<FSkillSlotView> Slots;
 
 	UPROPERTY(BlueprintReadOnly, Category = "HUD") FTargetFrameView Target;
+
+	/** 英雄属性面板（常驻条 + 展开）。bValid 与最外层 bBound 是两回事：这里说的是「读得到属性集」。 */
+	UPROPERTY(BlueprintReadOnly, Category = "HUD") FHeroAttributePanelView Attributes;
 };
 
 // ---------------------------------------------------------------------------
@@ -304,6 +426,15 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTargetFrameChangedSignature, cons
 
 /** 绑定状态变化。false 时 UI 显示未就绪；换 PS 时会先 false 再 true。 */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnHUDReadySignature, bool, bBound);
+
+/**
+ * 英雄属性面板变化（属性事件驱动，两端都触发）。
+ *
+ * 【为什么整块广播而不是「第几行变了」】属性之间会互相影响（攻速三条改一条就要重算派生值），
+ * 行号也不是稳定身份（DA 里插一行，后面所有行的下标都变）。整块广播的数据量是十几条 FText，
+ * 而它只在属性真的变化时发生（不是 30Hz 心跳），所以按块传更简单也更不容易错。
+ */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnHUDAttributesChangedSignature, const FHeroAttributePanelView&, Panel);
 
 /**
  * UI 层用的小工具。放在这里而不是某个 Widget 里，是为了让「显示口径」只有一份 ——
