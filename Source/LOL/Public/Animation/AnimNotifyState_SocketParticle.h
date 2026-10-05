@@ -3,20 +3,12 @@
 
 #include "CoreMinimal.h"
 #include "Animation/AnimNotifies/AnimNotifyState.h"
+#include "SocketSide.h"
 #include "AnimNotifyState_SocketParticle.generated.h"
 
 class UParticleSystem;
 class UParticleSystemComponent;
 class USkeletalMeshComponent;
-
-/** 挂哪只手（和 BladeTrail 的 EBladeTrailSide 同义，只是这里没有"拖尾"的语义）。 */
-UENUM()
-enum class ESocketParticleSide : uint8
-{
-	Left  UMETA(DisplayName = "Left (左手)"),
-	Right UMETA(DisplayName = "Right (右手)"),
-	Both  UMETA(DisplayName = "Both (双手)"),
-};
 
 /**
  * 在动画区间里往插槽上挂一个 Cascade 粒子（起 → 挂上，止 → 摘掉）。
