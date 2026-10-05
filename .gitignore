@@ -1,4 +1,10 @@
-# ============ Unreal Engine 5：构建产物（可再生，绝不提交）============
+# ==============================================================
+#  LOL — UE 5.8 工程
+#  只跟踪【游戏工程本身】：Source/ · Config/ · LOL.uproject · README.md
+#  引擎产物、打包产物、工具链、设计文档、Agent 记忆一律不入库。
+# ==============================================================
+
+# ---------- 引擎运行时产物（可再生，绝不提交）----------
 Binaries/
 DerivedDataCache/
 Intermediate/
@@ -6,11 +12,48 @@ Saved/
 Build/
 Script/
 
-# ============ 工程 / IDE 生成文件 ============
+# ---------- 游戏资产（7.5G，体积过大不进 git）----------
+# Paragon 素材包 + 二进制 .uasset。本地保留，另行交付。
+# ⚠️ clone 下来是"能读能搜但跑不起来"的空壳工程，要跑得自己补 Content/。
+Content/
+
+# ---------- 打包产物 ----------
+Windows/
+*.exe
+*.dll
+*.so
+*.dylib
+*.pak
+*.utoc
+*.ucas
+*.sig
+
+# ---------- 非游戏工程 ----------
+#   Tools/              构建与编辑器自动化脚本（VS COM 桥等）
+#   docs-design/        设计笔记 / CodeReview / 文档站
+#   .github/            文档站 CI
+#   .agents/ .claude/   编辑器 Agent 技能与配置
+#   .workbuddy/         Agent 记忆
+#   ArtRefs/ UE_Shot/   美术参考图 / 编辑器截图
+#   _backup_Variant/    引擎 Variant 模板备份
+#   SecondAttempt/      旧仓库副本
+#   Plugins/UnrealBridge  开发期桥接插件（非游戏运行时依赖）
+Tools/
+docs-design/
+.github/
+.agents/
+.claude/
+.workbuddy/
+ArtRefs/
+UE_Shot/
+_backup_Variant/
+SecondAttempt/
+Plugins/UnrealBridge/
+
+# ---------- IDE / 编辑器状态 ----------
 .vs/
 .vscode/
 .idea/
-.vsconfig
 *.sln
 *.slnx
 *.xcodeproj
@@ -20,18 +63,19 @@ Script/
 *.sdf
 *.suo
 *.user
+*.swp
+*~
+.vsconfig
 
-# ============ 编译产物 ============
+# ---------- 编译产物 ----------
 *.o
 *.obj
 *.a
 *.lib
-*.so
-*.dll
-*.dylib
-*.exe
+__pycache__/
+*.pyc
 
-# ============ 隐私 / 密钥 / 凭据（硬规则：绝不上传）============
+# ---------- 凭据（硬规则：绝不上传）----------
 .env
 .env.*
 !.env.example
@@ -45,7 +89,6 @@ id_rsa
 id_rsa.*
 id_ed25519
 id_ed25519.*
-*.pem
 .aws/
 .ssh/
 credentials.json
@@ -59,26 +102,9 @@ secret.*
 .npmrc
 .pypirc
 
-# ============ 日志 / 系统杂项 ============
+# ---------- 日志 / 系统杂项 ----------
 *.log
 .DS_Store
 Thumbs.db
 Desktop.ini
 desktop.ini
-
-# ============ 游戏资产（体积过大，不进 git）============
-# 7.5G 的 Paragon 素材包 + .uasset 二进制，本地保留，用 build/网盘交付
-Content/
-
-# 嵌套的独立 git 仓库（有自己的 .git，外层不跟踪，避免 gitlink）
-SecondAttempt/
-
-# ============ Agent 工作数据（本地记忆 / 会话日志，不进版本控制）============
-.workbuddy/
-
-# ============ 文档站构建产物 ============
-# docs/ 由 Tools/sync_docs.py 从根目录的 Markdown 生成，是中间产物 ——
-# 真值源永远在仓库根目录（GAS_*_Setup.md / CONVENTIONS.md / README.md）。
-# 所以 docs/ 里别放需要长期保留的文件，它会被同步覆盖。
-site/
-docs/
